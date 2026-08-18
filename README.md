@@ -160,6 +160,18 @@ Update package metadata:
 pkg update
 ```
 
+Enable the Termux root package repository, which provides `tcpdump` used by the verification steps later in this guide:
+
+```sh
+pkg install root-repo
+```
+
+Refresh package metadata after enabling the repository:
+
+```sh
+pkg update
+```
+
 Install the packages required for the setup itself:
 
 ```sh
@@ -180,13 +192,13 @@ There is no need to install `clang` separately: the Termux `golang` package alre
 Some verification steps later in the guide use additional tools. They are not required for Yggdrasil itself. Install them if you want to reproduce those tests:
 
 ```sh
-pkg install curl iputils openssh tcpdump
+pkg install curl openssh tcpdump
 ```
 
 They are used only for verification:
 
 - `curl` — HTTP connectivity test over Yggdrasil;
-- `iputils` — `ping` test;
+- Android's system `ping` command — ICMP reachability test; no separate `iputils` package is required here;
 - `openssh` — temporary inbound SSH target for the firewall test;
 - `tcpdump` — observing packets on `ygg0` during the firewall test.
 
