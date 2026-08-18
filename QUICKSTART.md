@@ -18,7 +18,15 @@ pkg update
 ```
 
 ```sh
-pkg install git golang termux-services iproute2 procps nano
+pkg install root-repo
+```
+
+```sh
+pkg update
+```
+
+```sh
+pkg install git golang termux-services iproute2 procps nano curl openssh tcpdump
 ```
 
 ## 3. Build Yggdrasil
