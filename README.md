@@ -1996,3 +1996,7 @@ Android
 No Android VPN API. No custom DNS daemon. No additional overlay-routing wrapper.
 
 Just native Yggdrasil, Android TUN, policy routing, `runit` and a small stateful firewall.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE).
