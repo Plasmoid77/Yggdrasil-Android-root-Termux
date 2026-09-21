@@ -177,6 +177,48 @@ Make both scripts executable:
 chmod +x "$PREFIX/var/service/yggdrasil/run" "$PREFIX/var/service/yggdrasil/finish"
 ```
 
+### 6.1 Optional: WebRTC calls while an Android VPN is active
+
+If Yggdrasil works through an Android VPN but a WebRTC app such as Conversations cannot establish calls while it remains inside the VPN, check the VPN interface:
+
+```sh
+su -c 'ip -br addr'
+```
+
+On the tested AmneziaVPN setup the VPN interface was `tun0`. If it has only link-local IPv6 (`fe80::`) and no usable global/ULA IPv6 address, add the tested synthetic ULA:
+
+```sh
+su -c 'ip -6 addr replace fd42:7967:6772::1/128 dev tun0'
+```
+
+Verify:
+
+```sh
+su -c 'ip -br -6 addr show dev tun0'
+```
+
+For Conversations, restart the app before testing:
+
+```sh
+su -c 'am force-stop eu.siacs.conversations'
+```
+
+The synthetic address only gives WebRTC a usable IPv6 base socket. Yggdrasil destinations still match:
+
+```text
+1000: from all to 200::/7 lookup 200
+```
+
+and therefore leave through `ygg0`; non-Yggdrasil traffic remains under the normal Android/VPN policy.
+
+Remove the workaround with:
+
+```sh
+su -c 'ip -6 addr del fd42:7967:6772::1/128 dev tun0'
+```
+
+If the VPN already has usable non-link-local IPv6, this workaround is normally unnecessary. See the full README for the explanation and verification procedure.
+
 ## 7. Configure the firewall
 
 ```sh
