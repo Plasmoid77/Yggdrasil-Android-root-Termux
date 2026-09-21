@@ -653,6 +653,185 @@ So the final tested configuration is:
 
 with no `999` rule.
 
+### 10.3 Android VPN + WebRTC/VoIP compatibility
+
+This subsection is optional. The base Yggdrasil setup works without it.
+
+It addresses a specific Android/WebRTC case that was reproduced and fixed on the tested device:
+
+- Yggdrasil itself works while an Android `VpnService` VPN is active;
+- normal XMPP traffic through Yggdrasil works;
+- WebRTC calls work with the VPN disabled or when the calling app is excluded from the VPN;
+- with the calling app inside an IPv4-only VPN, WebRTC may gather only the VPN's IPv4 ICE candidate and never create a usable IPv6 ICE path to Yggdrasil.
+
+The tested combination was:
+
+```text
+LineageOS 23 / Android 16
+Conversations 2.20.3+free
+AmneziaVPN
+Yggdrasil v0.5.14
+```
+
+#### Why the Yggdrasil route alone is not enough
+
+The routing rule from this guide is already correct:
+
+```text
+1000: from all to 200::/7 lookup 200
+```
+
+However, a route can only be selected after an application actually creates a packet.
+
+Android WebRTC discovers networks through Android's network APIs and obtains addresses from each network's `LinkProperties`. On the failing VPN setup, the VPN interface had:
+
+```text
+IPv4:       usable
+IPv6:       link-local only (fe80::/64)
+```
+
+WebRTC therefore created only an IPv4 ICE socket/candidate for the VPN. No IPv6 STUN packet to the Yggdrasil `200::/7` space was generated, so the otherwise-correct rule `1000` never had a packet to route.
+
+#### Tested workaround: add a synthetic ULA to the VPN interface
+
+First identify the active VPN interface:
+
+```sh
+su -c 'ip -br addr'
+```
+
+On the tested AmneziaVPN setup it was:
+
+```text
+tun0
+```
+
+Check its IPv6 addresses:
+
+```sh
+su -c 'ip -br -6 addr show dev tun0'
+```
+
+If the VPN has only a link-local `fe80::` address and no usable global/ULA IPv6 address, add the tested synthetic ULA:
+
+```sh
+su -c 'ip -6 addr replace fd42:7967:6772::1/128 dev tun0'
+```
+
+Verify:
+
+```sh
+su -c 'ip -br -6 addr show dev tun0'
+```
+
+You should now see:
+
+```text
+fd42:7967:6772::1/128
+```
+
+Restart the WebRTC application before testing again. For Conversations:
+
+```sh
+su -c 'am force-stop eu.siacs.conversations'
+```
+
+Then reopen Conversations and place a call.
+
+#### Why this works
+
+The synthetic ULA is not a Yggdrasil address and it does not add a route for normal IPv6 traffic. Its purpose is only to make the Android VPN network expose a usable IPv6 address to WebRTC so that WebRTC can create an IPv6 ICE socket.
+
+The packet path then becomes:
+
+```text
+WebRTC sees usable IPv6 on the Android VPN network
+        |
+        v
+WebRTC creates an AF_INET6 ICE socket
+        |
+        v
+ICE/STUN packet destination is inside 200::/7
+        |
+        v
+RPDB rule priority 1000 matches first
+        |
+        v
+table 200
+        |
+        v
+200::/7 -> ygg0
+        |
+        v
+packet leaves with the real Yggdrasil source address
+```
+
+On the tested Android 16 setup, Android's secure-VPN policy rules were at much later priorities than rule `1000`. Verify this on another ROM with:
+
+```sh
+su -c 'ip -6 rule show'
+```
+
+The important property is that the Yggdrasil destination rule appears before the Android VPN rules.
+
+No `::/0` route is added through `ygg0`, and no general VPN bypass is created. Therefore:
+
+```text
+destination in 200::/7 -> ygg0
+everything else        -> normal Android/VPN policy
+```
+
+This also remains valid for a VPN that carries normal IPv6 through a broad route such as `::/0`: the more specific policy decision is made by the earlier RPDB rule for Yggdrasil destinations.
+
+#### What was observed in the successful test
+
+Before the workaround, WebRTC inside the VPN emitted only the VPN IPv4 candidate and no Yggdrasil STUN traffic appeared on `ygg0`.
+
+After adding the synthetic ULA, a call established direct bidirectional UDP media between the two Yggdrasil addresses. STUN traffic to the Yggdrasil STUN server was also visible on `ygg0`.
+
+The actual media path used the real Yggdrasil address, not the synthetic ULA. The ULA only enabled WebRTC to create the IPv6 socket required to reach the Yggdrasil path.
+
+#### Verify the path
+
+For any known Yggdrasil destination:
+
+```sh
+su -c 'ip -6 route get <YGGDRASIL_IPV6>'
+```
+
+Expected properties:
+
+```text
+dev ygg0
+table 200
+src <YOUR_YGG_IP>
+```
+
+During a WebRTC call, packet capture should show IPv6 UDP on `ygg0`:
+
+```sh
+su -c 'tcpdump -ni ygg0 -tttt -vv udp'
+```
+
+#### Rollback
+
+The workaround does not modify the Yggdrasil routing table. To remove only the synthetic address:
+
+```sh
+su -c 'ip -6 addr del fd42:7967:6772::1/128 dev tun0'
+```
+
+The synthetic address is also lost automatically if the VPN recreates its TUN interface.
+
+If the VPN interface already exposes a usable non-link-local IPv6 address, this workaround should normally be unnecessary.
+
+> This exact workaround is confirmed on the tested LineageOS 23 / Android 16 + AmneziaVPN setup. Different ROMs or VPN implementations may expose their VPN `LinkProperties` differently.
+
+Upstream implementation references:
+
+- WebRTC Android network discovery: https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java
+- Android netd policy routing: https://android.googlesource.com/platform/system/netd/+/master/server/RouteController.cpp
+
 ---
 
 ## 11. Firewall
