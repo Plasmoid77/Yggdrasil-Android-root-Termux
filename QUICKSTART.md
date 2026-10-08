@@ -361,10 +361,10 @@ After creating or recreating the service directory, wait for its supervisor endp
 
 ```sh
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ] && break
+    sv status yggdrasil >/dev/null 2>&1 && break
     sleep 1
 done
-if [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ]; then
+if sv status yggdrasil >/dev/null 2>&1; then
     sv-enable yggdrasil
 else
     echo 'ERROR: runit did not create supervise/ok; check the service supervisor.' >&2

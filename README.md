@@ -1196,10 +1196,10 @@ Allow the supervisor to notice a newly created or recreated service directory be
 
 ```sh
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ] && break
+    sv status yggdrasil >/dev/null 2>&1 && break
     sleep 1
 done
-if [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ]; then
+if sv status yggdrasil >/dev/null 2>&1; then
     sv-enable yggdrasil
 else
     echo 'ERROR: runit did not create supervise/ok; check the service supervisor.' >&2
@@ -1207,7 +1207,7 @@ else
 fi
 ```
 
-This checks readiness immediately, waits at most fifteen seconds, and enables the service only after its supervisor endpoint exists. It avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
+This checks readiness immediately, waits at most fifteen seconds, and enables the service only after `sv status` can communicate with its supervisor. Merely finding an old `supervise/ok` file would not prove that `runsv` is running. The check avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
 
 `sv-enable` removes the service's `down` file and requests that `runit` start it.
 
