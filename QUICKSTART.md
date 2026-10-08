@@ -6,10 +6,14 @@
 
 Minimal installation procedure without explanations or verification steps.
 
+This branch includes direct TCP peer transport outside an Android VPN, the event-driven ULA handler and the existing firewall. Android chooses Wi-Fi or mobile data without an extra switching service. [Transport details and verification](DIRECT-TRANSPORT.md).
+
 ## 1. Requirements
 
 - Rooted Android with working `su -c`.
 - `Termux` and `Termux:Boot`; launch `Termux:Boot` at least once from the Android launcher.
+
+Use the same signing source for both APKs (F-Droid or official GitHub releases); mixed signatures prevent installation. [Termux installation requirements](https://github.com/termux/termux-app#installation).
 
 ## 2. Install packages
 
@@ -33,6 +37,11 @@ pkg install git golang termux-services iproute2 procps nano curl openssh tcpdump
 
 ```sh
 cd ~
+git clone --depth 1 --branch direct-vpn-bypass https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux.git yggdrasil-android-guide
+```
+
+```sh
+cd ~
 ```
 
 ```sh
@@ -44,10 +53,14 @@ cd ~/yggdrasil-go
 ```
 
 ```sh
-./build -p -l "-checklinkname=0"
+git apply --check ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
+git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
+PKGVER=0.5.14-direct.2 ./build -p -l "-checklinkname=0"
 ```
 
 ## 4. Create the configuration
+
+The generation command below is for a new node. When reinstalling, back up the installed binaries, configuration and service/boot scripts, then copy `$PREFIX/etc/yggdrasil.conf` to `~/yggdrasil.conf` with mode600 instead of generating a new identity. Use fresh clone directories for a rebuild.
 
 ```sh
 ./yggdrasil -genconf > ~/yggdrasil.conf
@@ -57,18 +70,23 @@ cd ~/yggdrasil-go
 nano ~/yggdrasil.conf
 ```
 
-Add **2–3 current public peers** from:
+Add **2–3 current TCP IPv4 peers** from:
 
 https://github.com/yggdrasil-network/public-peers
 
-Example:
+Tested example (check current peer availability):
 
 ```text
 Peers: [
-  tcp://peer1.example:12345
-  tls://peer2.example:23456
+  tcp://87.249.44.53:18226
+  tcp://217.144.163.22:7991
 ]
+InterfacePeers: {}
+Listen: []
+MulticastInterfaces: []
 ```
+
+Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. QUIC is not covered by this patch.
 
 Set:
 
@@ -83,6 +101,14 @@ AdminListen: unix:///data/data/com.termux/files/usr/tmp/yggdrasil.sock
 ```
 
 ## 5. Install binaries and configuration
+
+For an existing installation, stop the service before replacing its files:
+
+```sh
+sv -w 25 down yggdrasil
+```
+
+Keep it stopped until the firewall is applied and the service is enabled below.
 
 ```sh
 install -m 755 ~/yggdrasil-go/yggdrasil "$PREFIX/bin/yggdrasil"
@@ -384,3 +410,5 @@ sv restart yggdrasil
 Reboot Android normally.
 
 Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
+
+After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. Reboot verification of this patched build is still pending.

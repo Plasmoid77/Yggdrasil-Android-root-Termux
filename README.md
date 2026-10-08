@@ -6,6 +6,8 @@ The goal of this guide is to run the regular Yggdrasil userspace router directly
 
 This branch integrates a small VPN compatibility handler into the existing runit `run`. It restores a fixed ULA address on Android VPN TUN interfaces when they change, allowing new Conversations/WebRTC calls in the tested IPv4-only VPN case. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the reason, implementation and verified limits.
 
+This branch also builds Yggdrasil v0.5.14 with a small outgoing TCP socket patch. Peer transport stays outside the Android VPN, while Android chooses Wi-Fi or mobile data. Other applications keep their existing VPN policy. No extra switching service is needed. [Transport details and measured results](DIRECT-TRANSPORT.md).
+
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
 > **Guide by Plasmoid (Neuroslopped)**
@@ -34,6 +36,7 @@ The resulting setup behaves much closer to a normal Linux Yggdrasil installation
 9. [Create the runit service](#9-create-the-runit-service)
 10. [Policy routing](#10-policy-routing)
     - [Android VPN + WebRTC/VoIP compatibility](#103-android-vpn--webrtcvoip-compatibility)
+    - [Direct peer transport](#104-direct-peer-transport)
 11. [Firewall](#11-firewall)
 12. [Autostart with TermuxBoot](#12-autostart-with-termuxboot)
 13. [First launch](#13-first-launch)
@@ -76,6 +79,8 @@ to 200::/7 lookup 200
 ```
 
 All normal Android traffic keeps using Android's normal routing tables.
+
+Outgoing Yggdrasil TCP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network; no Wi-Fi or mobile interface name is stored in the configuration.
 
 The service also maintains `fd42::1/128` on UP TUN interfaces named `tunN`, using network events rather than a background polling timer. This addresses the tested WebRTC/VPN case described in section 10.3.
 
@@ -154,6 +159,8 @@ You need:
 - a rooted Android device with working non-interactive root through `su -c`;
 - Termux, including its Bash shell;
 - Termux:Boot, launched at least once from the Android launcher before the first reboot test.
+
+Install Termux and Termux:Boot from the same signing source: F-Droid with F-Droid, or the official GitHub releases with GitHub. Mixing them can produce an "unknown error" because their shared Android UID requires matching APK signatures. See [Termux installation requirements](https://github.com/termux/termux-app#installation).
 
 This guide assumes root is already configured and working.
 
@@ -239,6 +246,15 @@ v0.5.14
 
 Clone it:
 
+First obtain this guide's patch:
+
+```sh
+cd ~
+git clone --depth 1 --branch direct-vpn-bypass https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux.git yggdrasil-android-guide
+```
+
+Then clone the pinned Yggdrasil release:
+
 ```sh
 cd ~
 ```
@@ -253,11 +269,15 @@ Enter the source tree:
 cd ~/yggdrasil-go
 ```
 
-Build:
+Apply the patch and build:
 
 ```sh
-./build -p -l "-checklinkname=0"
+git apply --check ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
+git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
+PKGVER=0.5.14-direct.2 ./build -p -l "-checklinkname=0"
 ```
+
+Use a fresh source checkout; do not apply the same patch twice. The resulting daemon version should be `0.5.14-direct.2`.
 
 ### Why `-checklinkname=0`?
 
@@ -303,7 +323,14 @@ Do not continue if you accidentally built `GOOS=linux` when following this guide
 
 ## 6. Create the Yggdrasil configuration
 
-Generate a fresh configuration:
+For a new node, generate a fresh configuration. To reinstall an existing node, first back up its binaries, configuration and service/boot scripts, then copy its existing configuration instead of generating a new identity:
+
+```sh
+cp -p "$PREFIX/etc/yggdrasil.conf" ~/yggdrasil.conf
+chmod 600 ~/yggdrasil.conf
+```
+
+For a new node only:
 
 ```sh
 cd ~/yggdrasil-go
@@ -336,33 +363,19 @@ https://github.com/yggdrasil-network/public-peers
 
 For normal usage, the official public-peers repository recommends **2 or 3 peers**. Prefer peers that are geographically close to you to keep latency down. Using a small set of stable peers also gives redundancy without creating unnecessary distant peerings.
 
-A peering URI can look like:
-
-```text
-tcp://host:port
-tls://host:port
-quic://host:port
-ws://host:port
-```
-
-For example, at the time this guide was prepared the public peer list included:
-
-```text
-tcp://yggno.de:18226
-```
-
-Peer availability changes over time. Do not treat any single URI in this README as permanent.
-
-Example:
+For this branch's tested direct transport, use TCP IPv4 literals in ordinary `Peers`. The following addresses were used for the tests; check current availability before choosing them:
 
 ```text
 Peers: [
-  tcp://yggno.de:18226
-  tls://another-nearby-peer.example:12345
+  tcp://87.249.44.53:18226
+  tcp://217.144.163.22:7991
 ]
+InterfacePeers: {}
+Listen: []
+MulticastInterfaces: []
 ```
 
-Replace example entries with current peers from the public-peers repository.
+Peer availability changes over time. Choose current nearby TCP IPv4 peers from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. QUIC is outside this patch's scope; do not assume it bypasses the VPN. Interface names are not pinned, and Android selects the physical network.
 
 ### 6.2 Fix the interface name
 
@@ -432,6 +445,14 @@ This command is used here as a parser/compatibility check. It does not overwrite
 ---
 
 ## 7. Install binaries and configuration
+
+When reinstalling an existing service, stop it before replacing its files:
+
+```sh
+sv -w 25 down yggdrasil
+```
+
+Keep it stopped while creating the service scripts below. Apply the firewall before enabling the service in section 13.
 
 Install the daemon:
 
@@ -894,6 +915,22 @@ Restoring an address does not restart ICE or migrate the application's existing 
 - Treat call recovery during a network switch as a separate application/ICE problem until packet captures and application logs establish its cause.
 
 Implementation references are listed in section 21. These constraints document the reason for the code so later edits can be reviewed without the original debugging conversation.
+
+### 10.4 Direct peer transport
+
+The patch in section 5 sets `SO_MARK=0x20000` on outgoing TCP peer sockets on Android. Socket setup errors are returned instead of allowing an unprotected connection. Android's physical-network selection handles Wi-Fi and mobile data without a new supervisor, timer or interface selector. The existing runit scripts need no transport changes.
+
+Verify the actual peer sockets with the VPN connected:
+
+```sh
+su -c "$PREFIX/bin/ss -tnep"
+```
+
+Yggdrasil peer sockets should have `fwmark:0x20000` and a physical-network source address. Applications that require the VPN should still use its address. A route lookup alone does not prove this socket path.
+
+The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil TCP peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
+
+Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. Reboot verification of this patched build is still pending; the earlier base-service reboot checks do not establish it. See [transport verification and limits](DIRECT-TRANSPORT.md).
 
 ---
 
@@ -1536,6 +1573,18 @@ su -c '/system/bin/ip6tables -L INPUT -n -v --line-numbers'
 
 After a successful outbound request, the `ESTABLISHED,RELATED` counter should increase.
 
+### 16.13 Direct transport and VPN compatibility
+
+With your VPN connected after reboot:
+
+```sh
+yggdrasil -version
+su -c "$PREFIX/bin/ss -tnep"
+su -c 'ip -6 -o addr show dev tun0'
+```
+
+Check `0.5.14-direct.2`, physical-source peer sockets with `fwmark:0x20000`, and `fd42::1/128` on the current VPN TUN interface (replace `tun0` if needed). Also verify an application that requires the VPN still connects through it.
+
 If all of the above succeeds without manually launching anything, the installation has survived a full Android reboot correctly.
 
 ---
@@ -1793,6 +1842,8 @@ The guide intentionally does not alter the rest of Android's firewall topology.
 ---
 
 ## 19. Updating Yggdrasil
+
+An unpatched binary removes the direct peer socket behaviour. The supplied patch is pinned to v0.5.14: reapply it when rebuilding that release and verify its applicability and socket behaviour before upgrading to a different release. Follow section 5 for a rebuild of the tested version; the steps below describe the general update process, not a verified direct-transport build of another version.
 
 Yggdrasil does not provide a built-in update notification mechanism, so check upstream releases periodically:
 

@@ -1,0 +1,60 @@
+diff --git a/src/core/link_tcp.go b/src/core/link_tcp.go
+index 7cbb1ba..b171820 100644
+--- a/src/core/link_tcp.go
++++ b/src/core/link_tcp.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/url"
++	"runtime"
+ 	"time"
+ 
+ 	"github.com/Arceliar/phony"
+@@ -65,8 +66,10 @@ func (l *linkTCP) dialerFor(dst *net.TCPAddr, sintf string) (*net.Dialer, error)
+ 		KeepAlive: -1,
+ 		Control:   l.tcpContext,
+ 	}
+-	if sintf != "" {
++	if sintf != "" || runtime.GOOS == "android" {
+ 		dialer.Control = l.getControl(sintf)
++	}
++	if sintf != "" {
+ 		ief, err := net.InterfaceByName(sintf)
+ 		if err != nil {
+ 			// On mobile platforms (Android/iOS), InterfaceByName may fail due to
+diff --git a/src/core/link_tcp_linux.go b/src/core/link_tcp_linux.go
+index 223d788..8271d0b 100644
+--- a/src/core/link_tcp_linux.go
++++ b/src/core/link_tcp_linux.go
+@@ -3,6 +3,7 @@
+ package core
+ 
+ import (
++	"runtime"
+ 	"syscall"
+ 
+ 	"golang.org/x/sys/unix"
+@@ -18,11 +19,20 @@ func (t *linkTCP) getControl(sintf string) func(string, string, syscall.RawConn)
+ 	return func(network, address string, c syscall.RawConn) error {
+ 		var err error
+ 		btd := func(fd uintptr) {
+-			err = unix.BindToDevice(int(fd), sintf)
++			if runtime.GOOS == "android" {
++				// Android protectedFromVpn bit; let Android choose the physical network.
++				err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, 1<<17)
++			}
++			if err == nil && sintf != "" {
++				err = unix.BindToDevice(int(fd), sintf)
++			}
++		}
++		if controlErr := c.Control(btd); controlErr != nil {
++			return controlErr
+ 		}
+-		_ = c.Control(btd)
+ 		if err != nil {
+-			t.core.log.Debugln("Failed to set SO_BINDTODEVICE:", sintf)
++			t.core.log.Debugln("Failed to set peer socket routing:", sintf)
++			return err
+ 		}
+ 		return t.tcpContext(network, address, c)
+ 	}
