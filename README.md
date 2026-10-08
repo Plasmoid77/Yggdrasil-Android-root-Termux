@@ -935,7 +935,7 @@ Yggdrasil peer sockets should have `fwmark:0x20000` and a physical-network sourc
 
 The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil TCP peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
 
-Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. Reboot verification of this patched build is still pending; the earlier base-service reboot checks do not establish it. See [transport verification and limits](DIRECT-TRANSPORT.md).
+Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from this branch and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](DIRECT-TRANSPORT.md).
 
 ---
 

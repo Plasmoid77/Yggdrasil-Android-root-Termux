@@ -424,4 +424,4 @@ Reboot Android normally.
 
 Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
 
-After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. Reboot verification of this patched build is still pending.
+After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall from this branch and full Android reboot passed on the tested phone; verify your own installation too.
