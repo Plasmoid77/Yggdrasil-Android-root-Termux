@@ -30,8 +30,10 @@ pkg update
 ```
 
 ```sh
-pkg install git golang termux-services iproute2 procps nano curl openssh tcpdump
+pkg install bash coreutils termux-tools git golang termux-services iproute2 procps nano curl openssh tcpdump
 ```
+
+Run package and build commands as the normal Termux user. `bash`, `coreutils` and `termux-tools` supply the shell, file utilities and wake lock; `git`/`golang` build the binaries, and `termux-services`/`iproute2`/`procps` supply supervision and networking tools. `nano` is the editor. `curl`, `openssh` and `tcpdump` are used by the full guide's verification steps. Root comes from `su`; no `sudo` or `tsu` package is needed.
 
 ## 3. Build Yggdrasil
 
@@ -384,13 +386,13 @@ sv restart yggdrasil
 Show this node:
 
 ```sh
-sudo "$PREFIX/bin/yggdrasilctl" -endpoint="unix://$PREFIX/tmp/yggdrasil.sock" getSelf
+su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getSelf"
 ```
 
 Show peers:
 
 ```sh
-sudo "$PREFIX/bin/yggdrasilctl" -endpoint="unix://$PREFIX/tmp/yggdrasil.sock" getPeers
+su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
 ```
 
 After editing the peer list in:

@@ -189,11 +189,14 @@ pkg update
 Install the packages required for the setup itself:
 
 ```sh
-pkg install git golang termux-services iproute2 procps nano
+pkg install bash coreutils termux-tools git golang termux-services iproute2 procps nano
 ```
 
 They are used for:
 
+- `bash` — the persistent root shell and event handler;
+- `coreutils` — file installation and standard shell utilities;
+- `termux-tools` — Termux commands, including `termux-wake-lock`;
 - `git` — cloning the Yggdrasil source tree;
 - `golang` — building Yggdrasil;
 - `termux-services` — `runit` integration;
@@ -215,6 +218,8 @@ They are used only for verification:
 - Android's system `ping` command — ICMP reachability test; no separate `iputils` package is required here;
 - `openssh` — temporary inbound SSH target for the firewall test;
 - `tcpdump` — observing packets on `ygg0` during the firewall test.
+
+Run the commands above inside Termux as its normal user; the later `su -c` commands acquire root only for system networking operations. Android already supplies `su` (through your root solution) and `/system/bin/ip6tables`; `sudo` or `tsu` is not required by this guide.
 
 Check the Go environment:
 

@@ -54,8 +54,8 @@ sv -w 25 up yggdrasil
 ## Verify
 
 ```sh
-sudo "$PREFIX/bin/yggdrasilctl" -endpoint="unix://$PREFIX/tmp/yggdrasil.sock" getPeers
-sudo "$PREFIX/bin/ss" -tnep
+su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
+su -c "$PREFIX/bin/ss -tnep"
 ```
 
 Both peers should be up. Their TCP sockets should have `fwmark:0x20000` and a physical-network source address. Check that other applications which require the VPN still use its address.
