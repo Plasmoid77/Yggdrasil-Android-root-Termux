@@ -357,19 +357,22 @@ Start `termux-services` in the current Android session:
 . /data/data/com.termux/files/usr/etc/profile.d/start-services.sh
 ```
 
-Enable Yggdrasil:
-
-After creating or recreating the service directory, allow the supervisor to notice it:
+After creating or recreating the service directory, wait for its supervisor endpoint and enable Yggdrasil:
 
 ```sh
-sleep 6
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ] && break
+    sleep 1
+done
+if [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ]; then
+    sv-enable yggdrasil
+else
+    echo 'ERROR: runit did not create supervise/ok; check the service supervisor.' >&2
+    false
+fi
 ```
 
-This is a one-time installation wait, not a background polling loop.
-
-```sh
-sv-enable yggdrasil
-```
+This waits at most fifteen seconds during installation and enables the service only after `runit` has discovered it. It adds no background polling loop.
 
 Yggdrasil is now managed with:
 

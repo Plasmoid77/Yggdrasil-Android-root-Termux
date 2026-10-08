@@ -1195,16 +1195,19 @@ Start the Termux service supervisor in the current Android session:
 Allow the supervisor to notice a newly created or recreated service directory before enabling Yggdrasil:
 
 ```sh
-sleep 6
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ] && break
+    sleep 1
+done
+if [ -p "$PREFIX/var/service/yggdrasil/supervise/ok" ]; then
+    sv-enable yggdrasil
+else
+    echo 'ERROR: runit did not create supervise/ok; check the service supervisor.' >&2
+    false
+fi
 ```
 
-This bounded installation wait avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
-
-Enable the Yggdrasil service:
-
-```sh
-sv-enable yggdrasil
-```
+This checks readiness immediately, waits at most fifteen seconds, and enables the service only after its supervisor endpoint exists. It avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
 
 `sv-enable` removes the service's `down` file and requests that `runit` start it.
 
