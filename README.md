@@ -1192,11 +1192,13 @@ Start the Termux service supervisor in the current Android session:
 . /data/data/com.termux/files/usr/etc/profile.d/start-services.sh
 ```
 
-Give it a moment:
+Allow the supervisor to notice a newly created or recreated service directory before enabling Yggdrasil:
 
 ```sh
-sleep 1
+sleep 6
 ```
+
+This bounded installation wait avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
 
 Enable the Yggdrasil service:
 

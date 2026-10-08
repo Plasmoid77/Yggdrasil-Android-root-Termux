@@ -359,6 +359,14 @@ Start `termux-services` in the current Android session:
 
 Enable Yggdrasil:
 
+After creating or recreating the service directory, allow the supervisor to notice it:
+
+```sh
+sleep 6
+```
+
+This is a one-time installation wait, not a background polling loop.
+
 ```sh
 sv-enable yggdrasil
 ```
