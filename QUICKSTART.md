@@ -60,6 +60,8 @@ git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
 PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ```
 
+Use fresh source: apply the patch once. `git apply --check` only checks applicability; `git apply` changes source; `./build` produces both binaries for the installation step below. `PKGVER` labels the build, `-p` enables PIE and `-l` passes a linker option. VPN bypass comes from marking TCP and QUIC/UDP sockets in the modified source. [Command explanations and patch internals](README.md#5-build-yggdrasil-natively-for-android). For an existing node, preserve its key/configuration and follow [the update procedure](README.md#19-updating-yggdrasil).
+
 ## 4. Create the configuration
 
 The generation command below is for a new node. When reinstalling, back up the installed binaries, configuration and service/boot scripts, then copy `$PREFIX/etc/yggdrasil.conf` to `~/yggdrasil.conf` with mode600 instead of generating a new identity. Use fresh clone directories for a rebuild.

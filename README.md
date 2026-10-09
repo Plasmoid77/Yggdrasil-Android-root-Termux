@@ -284,6 +284,16 @@ PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 
 Use a fresh source checkout; do not apply the same patch twice. The resulting daemon version should be `0.5.14-direct.3`.
 
+These commands perform three separate steps:
+
+1. `git apply --check` verifies that the patch fits the checked-out source. It changes no files and does not prove that a future release behaves correctly with the patch.
+2. `git apply` changes the source files described by the patch. It does not rebuild or change the installed daemon.
+3. `./build` compiles the modified source into `yggdrasil` and `yggdrasilctl` in the current directory. Installation happens later in this guide.
+
+In the build command, `PKGVER=0.5.14-direct.3` sets the displayed build version; the suffix does not enable VPN bypass. `-p` selects `-buildmode=pie` for Android, and `-l` passes the following string to the Go linker. See the upstream [v0.5.14 build script](https://github.com/yggdrasil-network/yggdrasil-go/blob/v0.5.14/build). The bypass comes from the source changes, not these build arguments.
+
+Run patching and building as the ordinary Termux user. The installed daemon runs as root through the service so it can set the socket mark. For an existing installation or a future release, use [section 19](#19-updating-yggdrasil) rather than repeating fresh-install commands or generating a new private key.
+
 ### Why `-checklinkname=0`?
 
 With the tested Go toolchain, building Yggdrasil v0.5.14 without this linker option failed with an error similar to:
@@ -323,6 +333,40 @@ GOARCH=arm64
 ```
 
 Do not continue if you accidentally built `GOOS=linux` when following this guide.
+
+### 5.2 What the patch changes
+
+The [patch](patches/android-peer-vpn-bypass.patch) is a unified diff against v0.5.14. `diff --git` names each changed file; `@@` marks a changed region. Lines starting with `-` are removed, lines starting with `+` are added, and unchanged context lets Git find the right location. It modifies three source files, with 56 added lines and 7 removed lines.
+
+**`src/core/link_tcp.go` — run socket control on Android.** Upstream selected `getControl` when a peer was bound to a named interface. The patch also selects it for Android with ordinary `Peers`, even when no interface is specified:
+
+```go
+if sintf != "" || runtime.GOOS == "android" {
+    dialer.Control = l.getControl(sintf)
+}
+```
+
+The separate interface-selection code still runs only when `sintf` is nonempty. The default configuration does not pin `wlan0` or a mobile interface: Android chooses the physical network for a new connection. TCP, TLS, WS, WSS, SOCKS and SOCKS+TLS share this TCP dialer.
+
+**`src/core/link_tcp_linux.go` — mark the socket before connection.** The callback obtains the socket descriptor through `syscall.RawConn.Control` and, on Android, executes:
+
+```go
+unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, 1<<17)
+```
+
+`1<<17` equals `0x20000`, the `protectedFromVpn` bit in Android's [Fwmark.h](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/include/Fwmark.h). This is local socket-routing metadata; it is not sent to the peer as a packet field. On the tested rooted phone, Android routes these sockets outside the VPN. If a named interface is explicitly requested, `BindToDevice` is still applied after marking. Errors from descriptor access, marking or interface binding are returned to the dialer, so a failed setup does not silently continue through the VPN.
+
+The filename ends in `_linux.go` because Android also uses Go's Linux platform files; `runtime.GOOS == "android"` restricts the new mark to Android. Building a generic Linux binary would skip that Android branch.
+
+**`src/core/link_quic.go` — give QUIC a marked UDP socket.** Upstream's `quic.DialAddr` creates its own UDP socket. On Android the patch instead creates one through `net.ListenConfig`, with the same socket-control callback:
+
+```go
+lc := net.ListenConfig{Control: l.tcp.getControl(info.sintf)}
+```
+
+It chooses UDP/IPv4 or UDP/IPv6 for the resolved destination, calls `ListenPacket`, then passes the resulting socket to `quic.Dial`. The mark is therefore set before the first QUIC handshake packet. The outgoing stream wrapper stores the owned `packetConn`; failed connection attempts, failed stream creation and stream closure close it. Non-Android QUIC dialing keeps the original `DialAddr` path.
+
+These changes protect outgoing peer transport sockets only. They add no service, polling loop, routing rule or firewall rule. `unix://` is local IPC and needs no IP-routing change. DNS resolution may still use the VPN; for SOCKS the marked connection reaches the proxy, whose onward route is controlled by that proxy. This patch does not change QUIC incoming listeners. See [section 10.4](#104-direct-peer-transport) for coverage and [DIRECT-TRANSPORT](DIRECT-TRANSPORT.md#all-outgoing-peer-transports-in-direct3) for the actual tests and their limits.
 
 ---
 
