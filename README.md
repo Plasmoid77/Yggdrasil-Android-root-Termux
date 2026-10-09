@@ -4,6 +4,8 @@ Native Yggdrasil node on rooted Android without the Android VPN API.
 
 The goal of this guide is to run the regular Yggdrasil userspace router directly on Android, create a real `ygg0` TUN interface, route only the Yggdrasil address space through it, supervise the daemon with `runit`, restore the firewall and service supervisor after reboot with Termux:Boot, and keep Android's normal network stack untouched.
 
+This branch integrates a small VPN compatibility handler into the existing runit `run`. It restores a fixed ULA address on Android VPN TUN interfaces when they change, allowing new Conversations/WebRTC calls in the tested IPv4-only VPN case. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the reason, implementation and verified limits.
+
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
 > **Guide by Plasmoid (Neuroslopped)**
@@ -31,6 +33,7 @@ The resulting setup behaves much closer to a normal Linux Yggdrasil installation
 8. [Final filesystem layout](#8-final-filesystem-layout)
 9. [Create the runit service](#9-create-the-runit-service)
 10. [Policy routing](#10-policy-routing)
+    - [Android VPN + WebRTC/VoIP compatibility](#103-android-vpn--webrtcvoip-compatibility)
 11. [Firewall](#11-firewall)
 12. [Autostart with TermuxBoot](#12-autostart-with-termuxboot)
 13. [First launch](#13-first-launch)
@@ -74,6 +77,8 @@ to 200::/7 lookup 200
 
 All normal Android traffic keeps using Android's normal routing tables.
 
+The service also maintains `fd42::1/128` on UP TUN interfaces named `tunN`, using network events rather than a background polling timer. This addresses the tested WebRTC/VPN case described in section 10.3.
+
 The Yggdrasil daemon is supervised by `runit`, so it can be controlled with:
 
 ```sh
@@ -115,13 +120,15 @@ Android boot
             └── yggdrasil
                 │
                 ├── run
+                │   ├── starts one persistent root Bash session
+                │   ├── subscribes to link/address events
                 │   ├── adds RPDB rule 1000
                 │   ├── removes stale ygg0
                 │   ├── prepares /dev/net/tun
-                │   ├── starts Yggdrasil as root
-                │   ├── waits for ygg0
-                │   ├── adds 200::/7 to table 200
-                │   └── waits for Yggdrasil
+                │   ├── starts Yggdrasil and waits for ygg0
+                │   ├── installs 200::/7 in table 200
+                │   ├── maintains ULA on matching VPN TUN interfaces
+                │   └── supervises Yggdrasil, monitor and event worker
                 │
                 └── finish
                     ├── stops Yggdrasil
@@ -145,7 +152,7 @@ Termux:Boot does not replace `runit`. It only starts the supervisor after Androi
 You need:
 
 - a rooted Android device with working non-interactive root through `su -c`;
-- Termux;
+- Termux, including its Bash shell;
 - Termux:Boot, launched at least once from the Android launcher before the first reboot test.
 
 This guide assumes root is already configured and working.
@@ -522,42 +529,110 @@ nano "$PREFIX/var/service/yggdrasil/run"
 
 Contents:
 
+The following complete `run` includes the event-driven ULA handler described in section 10.3. The original startup comments are retained; new comments explain the root session and event handling. Copy the whole script, including the final `YGG_ROOT` line and `wait` command.
+
 ```sh
 #!/data/data/com.termux/files/usr/bin/sh
-
-# Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
-su -c 'ip -6 ru add to 200::/7 lookup 200 prio 1000' 2>/dev/null || true
-
-# Remove a stale ygg0 interface left by an unclean previous shutdown.
-su -c 'ip link del ygg0' 2>/dev/null || true
-
-# Prepare the standard /dev/net/tun path for the TUN interface.
-su -c 'mkdir -p /dev/net && ln -sf /dev/tun /dev/net/tun'
-
+# Yggdrasil uses ygg0; Android VpnService uses tunN.
 # Merge stderr into stdout for runit service output.
 exec 2>&1
 
+# Run the following Bash block in one persistent root session.
+# Keep the outer shell waitable by runit; finish stops Yggdrasil.
+su -c 'exec /data/data/com.termux/files/usr/bin/bash -s' <<'YGG_ROOT' &
+children=()
+
+# Stop and reap all owned child processes when the root session exits.
+cleanup() {
+    trap - EXIT
+    ((${#children[@]})) && kill "${children[@]}" 2>/dev/null
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+
+# Subscribe before taking the initial snapshot so startup events are queued.
+coproc NET_EVENTS { exec ip -o monitor link address; }
+monitor_pid=$NET_EVENTS_PID
+children+=("$monitor_pid")
+# Duplicate the event stream so the background worker can read it.
+exec 3<&"${NET_EVENTS[0]}"
+
+# Wait up to five seconds for the Netlink subscription at startup only.
+subscribed=0
+for ((attempt=0; attempt<100; attempt++)); do
+    while read -r socket protocol port groups rest; do
+        if [[ $protocol == 0 && $port == "$monitor_pid" && $groups != 00000000 ]]; then
+            subscribed=1; break
+        fi
+    done < /proc/net/netlink
+    ((subscribed)) && break
+    kill -0 "$monitor_pid" 2>/dev/null || break
+    sleep 0.05
+done
+((subscribed)) || { echo 'ERROR: Netlink subscription failed'; exit 1; }
+
+# Maintain one fixed ULA on UP TUN interfaces named tunN.
+ula=fd42::1/128
+ensure_ula() {
+    local dev=$1 tun_flags link_flags addresses
+    [[ $dev =~ ^tun[0-9]+$ ]] || return 0
+    { read -r tun_flags < "/sys/class/net/$dev/tun_flags" &&
+      read -r link_flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || return 0
+    # Require TUN and UP; skip TAP and interfaces that are down.
+    (( (tun_flags & 1) && (link_flags & 1) )) || return 0
+    addresses=$(ip -6 -o addr show dev "$dev" 2>/dev/null) || return 0
+    # Leave the address unchanged when it is already present.
+    [[ $addresses == *"inet6 $ula "* ]] && return 0
+    ip -6 addr replace "$ula" dev "$dev" && echo "[VPN-ULA] Added $ula to $dev"
+}
+
+# Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
+ip -6 rule add to 200::/7 lookup 200 prio 1000 2>/dev/null || true
+
+# Remove a stale ygg0 interface left by an unclean previous shutdown.
+ip link del ygg0 2>/dev/null || true
+
+# Prepare the standard /dev/net/tun path for the TUN interface.
+mkdir -p /dev/net && ln -sf /dev/tun /dev/net/tun || exit 1
+
 # Start Yggdrasil with root privileges.
-su -c "/data/data/com.termux/files/usr/bin/yggdrasil -useconffile /data/data/com.termux/files/usr/etc/yggdrasil.conf" &
-YGG_PID=$!
+/data/data/com.termux/files/usr/bin/yggdrasil -useconffile /data/data/com.termux/files/usr/etc/yggdrasil.conf &
+ygg_pid=$!
+children+=("$ygg_pid")
 
 # Wait up to 30 seconds for ygg0 to appear.
-for i in $(seq 1 30); do
-    su -c 'ip link show ygg0' >/dev/null 2>&1 && break || true
+for ((attempt=0; attempt<30; attempt++)); do
+    ip link show ygg0 >/dev/null 2>&1 && break
+    kill -0 "$ygg_pid" 2>/dev/null || exit 1
     sleep 1
 done
-
 # Once ygg0 exists, route the Yggdrasil network through it in table 200.
-if su -c 'ip link show ygg0' >/dev/null 2>&1; then
-    su -c 'ip r add 200::/7 dev ygg0 metric 128 table 200'
-else
-    echo "ERROR: ygg0 did not appear" >&2
-    su -c "kill $YGG_PID" 2>/dev/null
-    exit 1
-fi
+ip -6 route replace 200::/7 dev ygg0 metric 128 table 200 || exit 1
 
+# Check existing interfaces once, then handle events without a timer.
+(
+    trap - EXIT TERM INT HUP
+    for path in /sys/class/net/tun[0-9]*; do ensure_ula "${path##*/}"; done
+    while IFS= read -r event <&3; do
+        # Extract the interface name, including from address deletion events.
+        read -r index dev rest <<< "${event#Deleted }"
+        [[ $index =~ ^[0-9]+:$ ]] || continue
+        dev=${dev%:}; dev=${dev%%@*}
+        ensure_ula "$dev"
+    done
+    exit 1
+) &
+worker_pid=$!
+children+=("$worker_pid")
+exec 3<&-
+
+# Exit and clean up if Yggdrasil, the monitor or the worker stops.
+# An enabled runit service can then restart the complete run script.
+wait -n "$ygg_pid" "$monitor_pid" "$worker_pid"
+YGG_ROOT
 # Keep the run script alive for as long as the Yggdrasil process is running.
-wait "$YGG_PID"
+wait "$!"
 ```
 
 ### 9.2 `finish`
@@ -674,6 +749,173 @@ So the final tested configuration is:
 ```
 
 with no `999` rule.
+
+### 10.3 Android VPN + WebRTC/VoIP compatibility
+
+This branch includes an event-driven VPN compatibility workaround in the `run` script from section 9.1. The base Yggdrasil routing scheme remains the same.
+
+The reproduced problem was:
+
+- Yggdrasil and ordinary XMPP traffic worked while an Android `VpnService` VPN was active;
+- Conversations calls worked without the VPN or when Conversations was excluded from it;
+- inside an IPv4-only VPN, WebRTC produced only the VPN IPv4 ICE candidate and no usable IPv6 path to Yggdrasil.
+
+The original packet-capture tests used:
+
+```text
+LineageOS 23 / Android 16
+Conversations 2.20.3+free
+AmneziaVPN
+Yggdrasil v0.5.14
+```
+
+Adding a ULA to the VPN interface allowed calls to establish. Adding it to `ygg0` or a separate dummy interface did not fix this case. The current script uses the short, fixed address:
+
+```text
+fd42::1/128
+```
+
+#### Why the Yggdrasil route alone is not enough
+
+Rule `1000` can route a packet only after the application creates it. In the failing capture, WebRTC emitted no IPv6 STUN traffic toward Yggdrasil, so the correct `200::/7 -> ygg0` route had nothing to route.
+
+WebRTC's Android network monitor obtains network addresses through Android's network APIs and `LinkProperties`. The failing VPN had usable IPv4 but only link-local IPv6 (`fe80::`). Adding a non-link-local IPv6 address to that VPN interface was the successful workaround.
+
+The working explanation is that the additional address enables an IPv6 ICE socket/path that was unavailable before. The observed candidate and packet changes support this explanation; they do not establish every internal Android/WebRTC step or guarantee identical behaviour on another ROM.
+
+In the earlier successful capture, STUN and direct bidirectional UDP media appeared on `ygg0`. The media used the real Yggdrasil addresses, not the synthetic ULA.
+
+#### What the ULA does
+
+`fd42::1/128` is a local compatibility address on the VPN interface. It is not the node's Yggdrasil identity, a public Internet address or an IPv6 address supplied by the VPN server. `/128` assigns one address rather than a subnet.
+
+The script adds no default IPv6 route and does not change VPN server settings. Destination routing still follows:
+
+| Destination | Route |
+| --- | --- |
+| `200::/7` | Rule `1000`, table `200`, `ygg0` |
+| Other destinations | Existing Android/VPN routing policy |
+
+On the tested device, rule `1000` is evaluated before Android's secure-VPN rules. Check this on another ROM:
+
+```sh
+su -c 'ip -6 rule show'
+```
+
+The ULA does not provide general IPv6 Internet access through an IPv4-only VPN. A dual-stack VPN keeps its existing IPv4 and IPv6 addresses alongside this additional address.
+
+#### Why the address is maintained automatically
+
+A VPN reconnect can destroy its TUN interface and create a new one. The new interface loses manually added addresses even if its name is still `tun0`; the name can also change to `tun1`.
+
+The service therefore maintains the ULA for the lifetime of `run`. It subscribes to:
+
+```sh
+ip -o monitor link address
+```
+
+This listens for kernel Netlink events. After confirming the subscription, the service checks existing interfaces once, then waits for link or address changes. Subscribing first queues events that occur during startup.
+
+For each event, the handler checks the current interface state:
+
+1. Its name must match `tunN`, such as `tun0` or `tun1`.
+2. Its `tun_flags` must identify a TUN interface, and its link flags must include `UP`.
+3. If `fd42::1/128` is already present, no address command is run.
+4. Otherwise, the handler adds that address with `ip -6 addr replace`.
+
+Adding the address generates another event. The next check finds it already present and makes no change. Deleting the address on a live interface triggers restoration; deleting the interface itself is ignored until a suitable interface appears again.
+
+This is a deliberately small detector for the tested Android `VpnService` interface convention. It matches UP TUN interfaces named `tunN`; it does not ask Android whether each matching interface is a registered VPN. Other root-created TUN interfaces with those names also match. Interfaces with other names are outside this workaround's scope.
+
+The script uses the same check for IPv4-only and dual-stack VPNs, keeping one fixed ULA on each matching interface. It does not need a separate address-family policy.
+
+#### Why one root session and one runit service
+
+The complete service block runs inside one persistent Termux Bash process started by `su`. Address events do not create new root sessions or repeated Magisk permission notifications. A service restart or a manually invoked root command can still show a notification.
+
+There is no five-second background polling loop and no recurring `dumpsys` call. The two bounded startup waits serve different purposes: up to five seconds to confirm the Netlink subscription, and up to thirty seconds for `ygg0` to appear.
+
+The root shell owns three children: Yggdrasil, `ip monitor` and the event worker. `wait -n` detects the first child exit, and the cleanup trap stops and reaps the others. An enabled runit service can restart the complete group if one component fails.
+
+The outer shell remains waiting for `su` instead of being replaced with it. This preserves the stop path through the existing `finish`, which stops Yggdrasil; its exit releases the root shell's wait and cleans up the monitor and worker.
+
+Everything remains in the existing `run` file. No separate watchdog service, boot-time address loop or permanent installer is needed. The quoted `YGG_ROOT` here-document keeps its contents for the root Bash to interpret. Bash supplies the arrays, regular expressions, coprocess and `wait -n` used by the handler; the outer shell is still `sh`.
+
+#### Verify the installed service
+
+After installing the updated `run`, restart an existing service with:
+
+```sh
+sv restart yggdrasil
+```
+
+Connect a VPN and identify its interface:
+
+```sh
+su -c 'ip -br addr'
+```
+
+For a matching interface such as `tun0`, verify the ULA:
+
+```sh
+su -c 'ip -6 -o addr show dev tun0'
+```
+
+Expected address:
+
+```text
+fd42::1/128
+```
+
+Reconnect the VPN and repeat the check on the current interface. A recreated interface should acquire the same ULA without restarting Yggdrasil. If you change the `ula` setting, reconnect the VPN once to discard the previous address.
+
+For a known Yggdrasil destination, check route selection:
+
+```sh
+su -c 'ip -6 route get <YGGDRASIL_IPV6>'
+```
+
+Expected properties:
+
+```text
+dev ygg0
+table 200
+src <YOUR_YGG_IP>
+```
+
+To inspect the media path during a call:
+
+```sh
+su -c 'tcpdump -ni ygg0 -tttt -vv udp'
+```
+
+Repeat the normal firewall and reboot verification in sections 15 and 16. A running service alone does not prove successful routing, call establishment or boot recovery.
+
+#### Tested behaviour and remaining limitation
+
+The event-driven service was tested with Amnezia Premium's IPv4-only VPN and a self-hosted Amnezia dual-stack VPN:
+
+| Test | Observed result |
+| --- | --- |
+| Start a new call after connecting or disconnecting either VPN | Calls worked |
+| Incoming calls with the updated service | Calls could be received and answered |
+| Disconnect the IPv4-only VPN during an active call | Call survived a brief audio interruption |
+| Enable the IPv4-only VPN during an active call | Conversations stayed in reconnecting state |
+| Enable or disable the tested dual-stack VPN during an active call | Call survived a brief audio interruption |
+
+Restoring an address does not restart ICE or migrate the application's existing sockets. The cause of the IPv4-only mid-call failure has not been established. The two VPN profiles also differ in server and configuration, so the comparison does not isolate address family as the only cause.
+
+#### Boundaries to preserve when changing this code
+
+- Keep the Yggdrasil destination rule and table `200`; the ULA is not a replacement route or source identity.
+- Keep the subscription before the initial snapshot, and check current state before adding an address.
+- Keep interface type/name filtering and the address-presence check; unrelated events and our own address events must not cause repeated writes.
+- Keep root privilege acquisition outside the event loop.
+- Keep Yggdrasil, monitor and worker tied to the same runit lifecycle, including cleanup on child exit.
+- Keep the complete `run` examples in this README and QUICKSTART identical when editing either guide.
+- Treat call recovery during a network switch as a separate application/ICE problem until packet captures and application logs establish its cause.
+
+Implementation references are listed in section 21. These constraints document the reason for the code so later edits can be reviewed without the original debugging conversation.
 
 ---
 
@@ -1349,13 +1591,16 @@ sv down yggdrasil
 Expected cleanup:
 
 ```text
-Yggdrasil process -> stopped
+Yggdrasil process  -> stopped
+monitor and worker -> stopped
 ygg0               -> removed
 rule 1000           -> removed
 table 200 route     -> removed with ygg0
 ```
 
 The firewall rules remain installed. They simply do not match while `ygg0` does not exist.
+
+Stopping Yggdrasil does not remove an existing ULA from a separate VPN interface. The address disappears when that VPN interface is destroyed; automatic restoration runs again when the Yggdrasil service starts.
 
 ### Start
 
@@ -1369,6 +1614,8 @@ The service recreates:
 rule 1000
 ygg0
 table 200 route
+link/address event monitor
+ULA handler for existing and future matching TUN interfaces
 ```
 
 ### Restart
@@ -1957,6 +2204,34 @@ Termux services / runit integration:
 
 https://github.com/termux/termux-services
 
+### VPN compatibility and service lifecycle
+
+WebRTC Android network discovery:
+
+https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java
+
+Android netd policy routing:
+
+https://android.googlesource.com/platform/system/netd/+/master/server/RouteController.cpp
+
+Kernel link/address events through `ip monitor`:
+
+https://man7.org/linux/man-pages/man8/ip-monitor.8.html
+
+Local IPv6 addresses (ULA):
+
+https://www.rfc-editor.org/rfc/rfc4193.html
+
+Bash coprocesses and `wait`:
+
+https://www.gnu.org/software/bash/manual/html_node/Coprocesses.html
+
+https://www.gnu.org/software/bash/manual/html_node/Job-Control-Builtins.html
+
+runit service supervision and `finish`:
+
+https://smarden.org/runit/runsv.8.html
+
 ### Existing Android guides used as reference
 
 Yggwiki — Android installation:
@@ -1975,6 +2250,7 @@ Important differences include:
 - fixed `ygg0`;
 - UNIX admin socket;
 - routing tied to `runit` lifecycle;
+- event-driven VPN ULA restoration inside the same service;
 - only destination rule `1000`, without source rule `999`;
 - stateful `ip6tables` protection on `ygg0`;
 - firewall persistence through Termux:Boot;
@@ -1998,7 +2274,9 @@ Android
 │   └── 10-services.sh
 │
 ├── runit
-│   └── yggdrasil
+│   └── yggdrasil service
+│       ├── Yggdrasil daemon
+│       └── VPN link/address handler
 │
 ├── ygg0
 │   └── Yggdrasil IPv6
@@ -2017,7 +2295,7 @@ Android
 
 No Android VPN API. No custom DNS daemon. No additional overlay-routing wrapper.
 
-Just native Yggdrasil, Android TUN, policy routing, `runit` and a small stateful firewall.
+Just native Yggdrasil, Android TUN, policy routing, `runit`, an event-driven VPN compatibility handler and a small stateful firewall.
 
 ## License
 
