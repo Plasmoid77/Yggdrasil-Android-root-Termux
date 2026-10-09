@@ -6,7 +6,7 @@ For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks out
 
 The existing runit service, ULA handler and firewall remain unchanged. This adds no network switching daemon or polling loop. Socket setup errors stop the connection. Other Termux/root processes keep their existing VPN path; no global routing or firewall bypass is installed.
 
-The patch covers TCP and transports that use its dialer, including TLS. **QUIC is not covered.** For the tested configuration, use TCP IPv4 literals, empty `InterfacePeers`, empty `Listen` and empty `MulticastInterfaces`. A hostname can still cause DNS resolution through the VPN. Preserve the existing private key and admin socket.
+The patch covers TCP and transports that use its dialer, including TLS. **QUIC is not covered.** Use TCP IPv4 literals for public peers, empty `InterfacePeers` and empty regular `Listen`. Wi-Fi multicast discovery is also enabled in the guide; its local peer connections use TLS/TCP. A hostname can still cause DNS resolution through the VPN. Preserve the existing private key and admin socket.
 
 The bit layout comes from Android's [Fwmark.h](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/include/Fwmark.h). This requires root socket privileges and was tested with Amnezia Premium IPv4-only on LineageOS 23 / Android 16, arm64. Check the actual socket path with your VPN.
 
@@ -40,8 +40,18 @@ Edit the existing configuration. Do not generate a new identity. Use two or thre
 ```text
 InterfacePeers: {}
 Listen: []
-MulticastInterfaces: []
+MulticastInterfaces: [
+  {
+    Regex: "^wlan[0-9]+$"
+    Beacon: true
+    Listen: true
+    Port: 0
+    Priority: 0
+  }
+]
 ```
+
+This enables built-in Wi-Fi discovery and advertisement using IPv6 link-local multicast. The regular `Listen: []` does not disable the listener created by multicast. The Wi-Fi regex does not bind public peers to Wi-Fi or add a network switching service. See [multicast details](README.md#wi-fi-multicast-discovery).
 
 Install the patched daemon and start the same service:
 
@@ -58,7 +68,7 @@ su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getP
 su -c "$PREFIX/bin/ss -tnep"
 ```
 
-Both peers should be up. Their TCP sockets should have `fwmark:0x20000` and a physical-network source address. Check that other applications which require the VPN still use its address.
+The public peers should be up. Their TCP sockets should have `fwmark:0x20000` and a physical-network source address. Discovered LAN peers appear separately as link-local TLS connections on Wi-Fi. Check that other applications which require the VPN still use its address.
 
 With the VPN enabled, switch Wi-Fi off and back on. Verify peer reconnection and the new physical source address **without restarting Yggdrasil**. Compare the daemon PID before and after. An existing connection may need time to reconnect; a route lookup alone does not prove handover.
 
@@ -77,6 +87,8 @@ These are small samples from one phone and network, not guaranteed latency or lo
 Conversations calls were verified separately on Wi-Fi with Amnezia XRay and AmneziaWG active. About 66 seconds of bidirectional WebRTC media were captured with XRay and 42 seconds with AmneziaWG. In both tests media used `ygg0`; the Yggdrasil peer transport used only `wlan0`, outside the VPN. The user confirmed both calls worked, and Codex retained its VPN connection. The ULA was restored automatically when switching to AmneziaWG, without restarting Yggdrasil or adding configuration changes. These tests verify the media path outside Amnezia on the phone; they do not establish whether a relay was used inside Yggdrasil. Separate IPv4 candidate probes were observed through the VPN during the XRay test. Network switching during a call has not been tested with this patched build.
 
 A clean reinstall from the published branch and a full Android reboot passed on 2026-10-09. An early Termux:Boot snapshot, about 25 seconds after boot, showed the service running with both peers connected through physical Wi-Fi and the three firewall rules restored. Post-reboot checks confirmed the original node identity, rule `1000`, table `200`, overlay HTTP 200 and automatic ULA restoration after the VPN connected. A bounded capture recorded peer TCP traffic only on `wlan0`, with none on the VPN interface. Other applications retained their VPN connection. The one-time diagnostic script removed itself; it is not part of the installation or a permanent helper.
+
+The latency, handover, call, clean-install and reboot tests above used `MulticastInterfaces: []`. Wi-Fi multicast was enabled and checked separately on 2026-10-09: the same patched binary automatically established a direct local peer connection with the OpenWrt router, while both public peers stayed up. A 15-second capture showed discovery and peer traffic only on `wlan0`; node identity, firewall, rule `1000`, table `200` and VPN ULA were preserved, and Codex retained its VPN connection. This configuration change needs only a Yggdrasil restart; it adds no helper service. Those earlier tests were not repeated after enabling multicast.
 
 ## Restore
 

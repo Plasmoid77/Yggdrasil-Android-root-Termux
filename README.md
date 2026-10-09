@@ -80,7 +80,7 @@ to 200::/7 lookup 200
 
 All normal Android traffic keeps using Android's normal routing tables.
 
-Outgoing Yggdrasil TCP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network; no Wi-Fi or mobile interface name is stored in the configuration.
+Outgoing Yggdrasil TCP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers; they are not bound to fixed Wi-Fi or mobile interface names. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
 
 The service also maintains `fd42::1/128` on UP TUN interfaces named `tunN`, using network events rather than a background polling timer. This addresses the tested WebRTC/VPN case described in section 10.3.
 
@@ -351,7 +351,7 @@ Edit it:
 nano ~/yggdrasil.conf
 ```
 
-Three parts matter for this setup.
+Configure public peers, Wi-Fi multicast discovery, the interface name and the admin socket.
 
 ### 6.1 Peers
 
@@ -377,10 +377,26 @@ Peers: [
 ]
 InterfacePeers: {}
 Listen: []
-MulticastInterfaces: []
+MulticastInterfaces: [
+  {
+    Regex: "^wlan[0-9]+$"
+    Beacon: true
+    Listen: true
+    Port: 0
+    Priority: 0
+  }
+]
 ```
 
-Peer availability changes over time. Choose current nearby TCP IPv4 peers from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. QUIC is outside this patch's scope; do not assume it bypasses the VPN. Interface names are not pinned, and Android selects the physical network.
+Peer availability changes over time. Choose current nearby TCP IPv4 peers from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. QUIC is outside this patch's scope; do not assume it bypasses the VPN. Public peers are not bound to a fixed interface, and Android selects the physical network.
+
+#### Wi-Fi multicast discovery
+
+`MulticastInterfaces` enables Yggdrasil's built-in discovery on Wi-Fi interfaces named `wlanN`. `Beacon: true` advertises this node; `Listen: true` discovers other nodes on the same LAN and connects to them. Discovery uses IPv6 link-local multicast (`ff02::114`, UDP port 9001); the resulting peer connection uses TLS over TCP. `Port: 0` chooses the local TCP port automatically. Keep the regular `Listen: []`: multicast creates its own link-local listener without a general incoming listener.
+
+The Wi-Fi regex limits local discovery; it does not pin the public peers to Wi-Fi. They still use Android's default physical network and remain available over mobile data. No helper service or additional firewall rules are needed. The existing firewall continues to protect traffic arriving through `ygg0`.
+
+On a router running Yggdrasil with compatible LAN multicast enabled, the phone can become a direct LAN peer. The [OpenWrt status module](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/blob/main/source/yggdrasil-status/README.md#behavior) then learns its native `node` address from the router's peer table and maps it to the phone's MAC. Merely connecting to the router's Wi-Fi is insufficient for that field: a local peer connection is required. Wi-Fi client isolation or blocked multicast can prevent discovery. To disable local discovery while retaining public peers, set `MulticastInterfaces: []` and restart Yggdrasil.
 
 ### 6.2 Fix the interface name
 

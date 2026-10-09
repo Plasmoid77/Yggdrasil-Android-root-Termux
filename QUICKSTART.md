@@ -85,10 +85,20 @@ Peers: [
 ]
 InterfacePeers: {}
 Listen: []
-MulticastInterfaces: []
+MulticastInterfaces: [
+  {
+    Regex: "^wlan[0-9]+$"
+    Beacon: true
+    Listen: true
+    Port: 0
+    Priority: 0
+  }
+]
 ```
 
 Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. QUIC is not covered by this patch.
+
+Multicast advertises and discovers local Yggdrasil nodes on Wi-Fi (`wlanN`) through IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` selects the local TCP port automatically; keep the regular `Listen: []`. A direct local peer connection lets a compatible OpenWrt status module show the phone's `node` address. The Wi-Fi regex only limits discovery: public peers still work over Wi-Fi or mobile data. No extra service or firewall rule is needed. To disable discovery, use `MulticastInterfaces: []`. [Details](README.md#wi-fi-multicast-discovery).
 
 Set:
 
