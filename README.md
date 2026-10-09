@@ -312,7 +312,7 @@ Edit it:
 nano ~/yggdrasil.conf
 ```
 
-Three parts matter for this setup.
+Configure public peers, Wi-Fi multicast discovery, the interface name and the admin socket.
 
 ### 6.1 Peers
 
@@ -356,6 +356,28 @@ Peers: [
 ```
 
 Replace example entries with current peers from the public-peers repository.
+
+#### Wi-Fi multicast discovery
+
+Set this field inside the existing configuration object to advertise and discover local Yggdrasil nodes on Wi-Fi interfaces named `wlanN`:
+
+```text
+MulticastInterfaces: [
+  {
+    Regex: "^wlan[0-9]+$"
+    Beacon: true
+    Listen: true
+    Port: 0
+    Priority: 0
+  }
+]
+```
+
+`Beacon: true` advertises the phone and `Listen: true` discovers nearby peers. Discovery uses IPv6 link-local multicast (`ff02::114`, UDP port 9001), then establishes TLS/TCP peer connections. `Port: 0` chooses the local TCP port automatically. Multicast creates its own link-local listener even if the regular `Listen` field is empty. Keep public peers for connectivity when no local peer is available.
+
+With compatible LAN multicast enabled on an OpenWrt router, a direct local peer connection lets its [Yggdrasil status module](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/blob/main/source/yggdrasil-status/README.md#behavior) show the phone's native `node` address by matching the router's peer table to the phone's MAC. Wi-Fi membership alone does not supply that address. Client isolation or blocked multicast can prevent discovery. No separate helper service or additional `ygg0` firewall rule is required. To disable discovery, set `MulticastInterfaces: []` and restart Yggdrasil.
+
+This field controls local discovery; it does not provide a general Android VPN bypass. The outgoing TCP socket patch for that purpose is documented in the [direct-vpn-bypass branch](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass).
 
 ### 6.2 Fix the interface name
 
