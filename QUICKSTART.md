@@ -310,3 +310,9 @@ sv restart yggdrasil
 Reboot Android normally.
 
 Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
+
+## 12. Updating Yggdrasil
+
+Follow [README section 19](README.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
+
+Use this branch's installed profile. A direct build needs the patch and checks from the [direct-vpn-bypass branch](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass#19-updating-yggdrasil), rather than an unpatched upstream replacement.
