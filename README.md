@@ -6,7 +6,7 @@ The goal of this guide is to run the regular Yggdrasil userspace router directly
 
 This branch integrates a small VPN compatibility handler into the existing runit `run`. It restores a fixed ULA address on Android VPN TUN interfaces when they change, allowing new Conversations/WebRTC calls in the tested IPv4-only VPN case. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the reason, implementation and verified limits.
 
-This branch also builds Yggdrasil v0.5.14 with a small outgoing TCP socket patch. Peer transport stays outside the Android VPN, while Android chooses Wi-Fi or mobile data. Other applications keep their existing VPN policy. No extra switching service is needed. [Transport details and measured results](DIRECT-TRANSPORT.md).
+This branch also builds Yggdrasil v0.5.14 with a small socket patch for outgoing TCP-based and QUIC peers. Peer transport stays outside the Android VPN, while Android chooses Wi-Fi or mobile data. Other applications keep their existing VPN policy. No extra switching service is needed. [Transport details and measured results](DIRECT-TRANSPORT.md).
 
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
@@ -80,7 +80,7 @@ to 200::/7 lookup 200
 
 All normal Android traffic keeps using Android's normal routing tables.
 
-Outgoing Yggdrasil TCP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers; they are not bound to fixed Wi-Fi or mobile interface names. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
+Outgoing TCP-based and QUIC/UDP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers; they are not bound to fixed Wi-Fi or mobile interface names. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
 
 The service also maintains `fd42::1/128` on UP TUN interfaces named `tunN`, using network events rather than a background polling timer. This addresses the tested WebRTC/VPN case described in section 10.3.
 
@@ -279,10 +279,10 @@ Apply the patch and build:
 ```sh
 git apply --check ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
 git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
-PKGVER=0.5.14-direct.2 ./build -p -l "-checklinkname=0"
+PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ```
 
-Use a fresh source checkout; do not apply the same patch twice. The resulting daemon version should be `0.5.14-direct.2`.
+Use a fresh source checkout; do not apply the same patch twice. The resulting daemon version should be `0.5.14-direct.3`.
 
 ### Why `-checklinkname=0`?
 
@@ -368,7 +368,7 @@ https://github.com/yggdrasil-network/public-peers
 
 For normal usage, the official public-peers repository recommends **2 or 3 peers**. Prefer peers that are geographically close to you to keep latency down. Using a small set of stable peers also gives redundancy without creating unnecessary distant peerings.
 
-For this branch's tested direct transport, use TCP IPv4 literals in ordinary `Peers`. The following addresses were used for the tests; check current availability before choosing them:
+The default example uses TCP IPv4 literals in ordinary `Peers`. TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC are all supported by the socket patch; see section 10.4. The following addresses were used for the tests; check current availability before choosing them:
 
 ```text
 Peers: [
@@ -388,7 +388,7 @@ MulticastInterfaces: [
 ]
 ```
 
-Peer availability changes over time. Choose current nearby TCP IPv4 peers from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. QUIC is outside this patch's scope; do not assume it bypasses the VPN. Public peers are not bound to a fixed interface, and Android selects the physical network.
+Peer availability changes over time. Choose current nearby peers using a supported transport from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. Public peers are not bound to a fixed interface, and Android selects the physical network.
 
 #### Wi-Fi multicast discovery
 
@@ -939,19 +939,42 @@ Implementation references are listed in section 21. These constraints document t
 
 ### 10.4 Direct peer transport
 
-The patch in section 5 sets `SO_MARK=0x20000` on outgoing TCP peer sockets on Android. Socket setup errors are returned instead of allowing an unprotected connection. Android's physical-network selection handles Wi-Fi and mobile data without a new supervisor, timer or interface selector. The existing runit scripts need no transport changes.
+The patch in section 5 sets `SO_MARK=0x20000` on outgoing TCP-based and QUIC/UDP peer sockets on Android. Socket setup errors are returned instead of allowing an unprotected connection. Android's physical-network selection handles Wi-Fi and mobile data without a new supervisor, timer or interface selector. The existing runit scripts need no transport changes.
 
 Verify the actual peer sockets with the VPN connected:
 
 ```sh
 su -c "$PREFIX/bin/ss -tnep"
+su -c "$PREFIX/bin/ss -ulnep"
 ```
 
 Yggdrasil peer sockets should have `fwmark:0x20000` and a physical-network source address. Applications that require the VPN should still use its address. A route lookup alone does not prove this socket path.
 
-The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil TCP peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
+The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
 
-Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from this branch and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](DIRECT-TRANSPORT.md).
+With the earlier `direct.2` build, Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from this branch and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](DIRECT-TRANSPORT.md).
+
+
+The patch covers every outgoing peer scheme supported by Yggdrasil v0.5.14:
+
+| Peer scheme | Local socket / VPN handling |
+| --- | --- |
+| `tcp://` | Marked outgoing TCP socket |
+| `tls://` | TLS over the same marked TCP dialer |
+| `ws://` | WebSocket over the same marked TCP dialer |
+| `wss://` | WebSocket/TLS over the same marked TCP dialer |
+| `socks://` | Marked TCP connection to the SOCKS proxy |
+| `sockstls://` | Marked TCP connection to the SOCKS proxy, then TLS |
+| `quic://` | Marked UDP socket created before the QUIC handshake |
+| `unix://` | Local IPC; no IP socket or VPN route |
+
+Only the daemon's outgoing transport sockets get this handling. It does not mark application UDP, all root/Termux traffic or future transports added upstream. UDP calls addressed to Yggdrasil already enter `ygg0` through rule `1000`; the peer transport carries those packets whether the peer uses TCP or QUIC.
+
+For QUIC, the daemon creates the UDP socket with the same Android socket control before passing it to quic-go. Socket-control failures abort the dial; failed handshakes and closed outgoing streams release the owned UDP socket. Non-Android QUIC dialing keeps upstream behavior.
+
+Hostnames can still resolve through the VPN. SOCKS and environment HTTP proxies are intermediary services: the marked local connection does not control how the proxy itself reaches its destination. `unix://` is local and needs no bypass. The default guide keeps regular `Listen: []`; it does not expose public incoming listeners. Preserve the private key and admin socket.
+
+The current `direct.3` build was checked separately with transport/socket tests and a real public QUIC peer with the VPN active. UDP traffic was observed only on physical Wi-Fi; the installed daemon kept its identity, configuration, multicast, routing, firewall and Codex's VPN path. The earlier call/handover/reboot tests have not been repeated on `direct.3`. [Detailed evidence and limits](DIRECT-TRANSPORT.md).
 
 ---
 
@@ -1609,7 +1632,7 @@ su -c "$PREFIX/bin/ss -tnep"
 su -c 'ip -6 -o addr show dev tun0'
 ```
 
-Check `0.5.14-direct.2`, physical-source peer sockets with `fwmark:0x20000`, and `fd42::1/128` on the current VPN TUN interface (replace `tun0` if needed). Also verify an application that requires the VPN still connects through it.
+Check `0.5.14-direct.3`, physical-source peer sockets with `fwmark:0x20000`, and `fd42::1/128` on the current VPN TUN interface (replace `tun0` if needed). Also verify an application that requires the VPN still connects through it.
 
 If all of the above succeeds without manually launching anything, the installation has survived a full Android reboot correctly.
 
@@ -1869,277 +1892,143 @@ The guide intentionally does not alter the rest of Android's firewall topology.
 
 ## 19. Updating Yggdrasil
 
-An unpatched binary removes the direct peer socket behaviour. The supplied patch is pinned to v0.5.14: reapply it when rebuilding that release and verify its applicability and socket behaviour before upgrading to a different release. Follow section 5 for a rebuild of the tested version; the steps below describe the general update process, not a verified direct-transport build of another version.
+Check [upstream releases and release notes](https://github.com/yggdrasil-network/yggdrasil-go/releases), including the required Go version, configuration changes and peer/protocol compatibility. Choose a stable release tag deliberately; the examples below use the placeholder `vX.Y.Z`. They do not claim that an unreleased or untested version is compatible.
 
-Yggdrasil does not provide a built-in update notification mechanism, so check upstream releases periodically:
+Use the instructions for your installed profile. `main` builds upstream Yggdrasil; `webrtc-vpn-compat` adds the runit ULA handler; `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets. An upstream binary installed over a direct build removes that socket patch. [Direct profile](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass#19-updating-yggdrasil).
 
-https://github.com/yggdrasil-network/yggdrasil-go/releases
+A normal update builds separately, validates the existing configuration, saves a rollback copy, then replaces **both** `yggdrasil` and `yggdrasilctl`. Keep the configuration, private key, `Peers`, `MulticastInterfaces`, `IfName`, `AdminListen`, service/boot scripts and firewall. Do not run `-genconf`: preserving the key preserves the node address. No full reinstall or reboot is needed for a normal binary-only update.
 
-Do **not** blindly replace a working root networking daemon.
+Run the following stages in the same Termux shell, as its normal user. Save the printed source and backup paths; in a new shell, set `ygg_update_dir` and `ygg_backup_dir` to those paths again. If any command fails, stop at that stage; do not continue to installation.
 
-The safe update model is:
+### 19.1 Clone the selected release into a fresh directory
 
-```text
-build the new version separately
-              │
-              ▼
-verify new binaries and existing config
-              │
-              ▼
-backup current binaries and config
-              │
-              ▼
-      sv down yggdrasil
-              │
-              ▼
-       install new binaries
-              │
-              ▼
-       sv up yggdrasil
-              │
-              ▼
-     post-update verification
-          ┌───┴───┐
-          │       │
-      success   failure
-          │       │
-          ▼       ▼
-    keep update  rollback
-```
-
-### 19.1 Do not regenerate the configuration during a normal update
-
-Your Yggdrasil identity is derived from the cryptographic keypair stored in the configuration.
-
-Regenerating the config creates a new identity and therefore a different Yggdrasil IPv6 address.
-
-Keep:
-
-```text
-$PREFIX/etc/yggdrasil.conf
-```
-
-unless you intentionally want a new node identity.
-
-### 19.2 Clone the new release separately
-
-Replace:
-
-```text
-vX.Y.Z
-```
-
-with the release you intentionally selected.
+Replace `vX.Y.Z` before running this block. A fresh directory preserves earlier source trees and backups.
 
 ```sh
-cd ~
+ygg_release='vX.Y.Z'
+ygg_update_dir=$(mktemp -d "$HOME/yggdrasil-source.XXXXXX")
+printf 'Source: %s\n' "$ygg_update_dir"
+git clone --depth 1 --branch "$ygg_release" https://github.com/yggdrasil-network/yggdrasil-go.git "$ygg_update_dir"
 ```
+
+### 19.2 Build and check the Android binaries
+
+Check the selected release's build instructions and Go requirement. The commands below retain this guide's Android PIE build and the linker workaround used for v0.5.14; a future release may need different flags. Build in Termux with `GOOS=android`, the phone's `GOARCH` and `CGO_ENABLED=1`. A generic Linux/arm64 release binary is not this Android build.
+
+Before building, review the patch against the selected release. The supplied patch was tested on **v0.5.14**. Successful `git apply --check` only proves textual applicability; it does not prove the routing behavior remains correct. If it fails, adapt and review the patch for that release or keep the working version. Do not force a failed patch or fall back to an unpatched binary to retain VPN bypass. If upstream later implements equivalent behavior, review that implementation before deciding whether the local patch is still needed.
+
+The example uses the patch from this guide's `direct-vpn-bypass` checkout and labels the candidate with its actual upstream version plus `-direct.local`:
 
 ```sh
-rm -rf ~/yggdrasil-go-update
+ygg_patch="$HOME/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch"
+git -C "$ygg_update_dir" apply --check "$ygg_patch" &&
+git -C "$ygg_update_dir" apply "$ygg_patch" &&
+(cd "$ygg_update_dir" && PKGVER="${ygg_release#v}-direct.local" ./build -p -l "-checklinkname=0")
 ```
+
+The suffix identifies a local build; it is not proof of VPN bypass.
+
+Check both binaries before stopping the running daemon:
 
 ```sh
-git clone --depth 1 --branch vX.Y.Z https://github.com/yggdrasil-network/yggdrasil-go.git ~/yggdrasil-go-update
+"$ygg_update_dir/yggdrasil" -version
+go version -m "$ygg_update_dir/yggdrasil"
+go version -m "$ygg_update_dir/yggdrasilctl"
 ```
+
+Confirm the intended version, `GOOS=android`, the phone's architecture (arm64 on the tested device) and `CGO_ENABLED=1`. Build/metadata failures leave the current installation running.
+
+### 19.3 Save a private rollback copy and validate the existing configuration
 
 ```sh
-cd ~/yggdrasil-go-update
+ygg_backup_dir=$(mktemp -d "$HOME/yggdrasil-backup.XXXXXX")
+printf 'Backup: %s\n' "$ygg_backup_dir"
+cp -p "$PREFIX/bin/yggdrasil" "$ygg_backup_dir/yggdrasil" &&
+cp -p "$PREFIX/bin/yggdrasilctl" "$ygg_backup_dir/yggdrasilctl" &&
+cp -p "$PREFIX/etc/yggdrasil.conf" "$ygg_backup_dir/yggdrasil.conf" &&
+chmod 600 "$ygg_backup_dir/yggdrasil.conf"
 ```
 
-### 19.3 Build it
+The directory created by `mktemp -d` is private. Never publish its configuration or key. Keep it until the new version is known to work.
 
-For a release that still requires the same linker workaround:
+Parse the live configuration with the candidate and compare its derived node address with the installed binary's result:
 
 ```sh
-./build -p -l "-checklinkname=0"
+"$ygg_update_dir/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -normaliseconf >/dev/null &&
+"$PREFIX/bin/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -address > "$ygg_backup_dir/address.before" &&
+"$ygg_update_dir/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -address > "$ygg_backup_dir/address.candidate" &&
+cmp "$ygg_backup_dir/address.before" "$ygg_backup_dir/address.candidate" &&
+echo CONFIG_OK
 ```
 
-Do not assume forever that every future version needs exactly the same build flags. Check the release notes first.
+Only continue after `CONFIG_OK`. Normalized output is discarded; the installed config is not overwritten. If release notes require a config change, back it up first, make that change deliberately and validate again. Address comparison checks identity, not all future configuration semantics.
 
-### 19.4 Verify the new binaries before touching the running service
+### 19.4 Replace only the two binaries
+
+This interrupts Yggdrasil briefly. Other Termux services remain running.
 
 ```sh
-./yggdrasil -version
+sv -w 25 down yggdrasil &&
+install -m 755 "$ygg_update_dir/yggdrasil" "$PREFIX/bin/yggdrasil" &&
+install -m 755 "$ygg_update_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
+sv -w 25 up yggdrasil
 ```
 
-```sh
-go version -m ./yggdrasil | grep -E 'CGO_ENABLED|GOOS|GOARCH'
-```
+The chained commands stop on failure. If installation fails after the service stops, restore **both** old binaries with section 19.6. This is a manual update, not an automatic rollback script.
 
-```sh
-go version -m ./yggdrasilctl | grep -E 'CGO_ENABLED|GOOS|GOARCH'
-```
-
-### 19.5 Check the existing configuration with the new binary
-
-```sh
-./yggdrasil -useconffile "$PREFIX/etc/yggdrasil.conf" -normaliseconf >/dev/null && echo CONFIG_OK
-```
-
-Expected:
-
-```text
-CONFIG_OK
-```
-
-Do not automatically write normalized output back into the config during an update.
-
-If a release changes configuration semantics, read its release notes and make deliberate changes.
-
-### 19.6 Create a rollback backup
-
-```sh
-rm -rf "$HOME/yggdrasil-update-backup"
-```
-
-```sh
-mkdir -p "$HOME/yggdrasil-update-backup"
-```
-
-```sh
-cp "$PREFIX/bin/yggdrasil" "$HOME/yggdrasil-update-backup/yggdrasil"
-```
-
-```sh
-cp "$PREFIX/bin/yggdrasilctl" "$HOME/yggdrasil-update-backup/yggdrasilctl"
-```
-
-```sh
-cp "$PREFIX/etc/yggdrasil.conf" "$HOME/yggdrasil-update-backup/yggdrasil.conf"
-```
-
-The config backup is especially important because it contains the node identity.
-
-### 19.7 Stop the current daemon
-
-```sh
-sv down yggdrasil
-```
-
-Confirm:
+### 19.5 Verify before keeping the update
 
 ```sh
 sv status yggdrasil
-```
-
-### 19.8 Install the new binaries
-
-```sh
-install -m 755 ~/yggdrasil-go-update/yggdrasil "$PREFIX/bin/yggdrasil"
-```
-
-```sh
-install -m 755 ~/yggdrasil-go-update/yggdrasilctl "$PREFIX/bin/yggdrasilctl"
-```
-
-The runit scripts, firewall and Termux:Boot files do not need to change for a normal binary-only update.
-
-### 19.9 Start the updated version
-
-```sh
-sv up yggdrasil
-```
-
-Check:
-
-```sh
-sv status yggdrasil
-```
-
-```sh
 "$PREFIX/bin/yggdrasil" -version
-```
-
-### 19.10 Post-update verification
-
-Check the interface:
-
-```sh
-su -c 'ip -6 addr show dev ygg0'
-```
-
-Check rule `1000`:
-
-```sh
-su -c 'ip -6 rule show' | grep '^1000:'
-```
-
-Check table `200`:
-
-```sh
-su -c 'ip -6 route show table 200'
-```
-
-Check peers:
-
-```sh
+su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getSelf"
 su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
-```
-
-Check actual traffic:
-
-```sh
-curl -6 --noproxy '*' --connect-timeout 10 -I 'http://[324:71e:281a:9ed3::ace]/'
-```
-
-Check that the firewall is still present:
-
-```sh
+su -c "$PREFIX/bin/ip -6 addr show dev ygg0"
+su -c "$PREFIX/bin/ip -6 rule show"
+su -c "$PREFIX/bin/ip -6 route show table 200"
 su -c '/system/bin/ip6tables -S INPUT'
+curl -6 --noproxy '*' --max-time 15 -I 'http://[324:71e:281a:9ed3::ace]/'
 ```
 
-### 19.11 Rollback
+Allow time for peers to reconnect. Confirm the original native node address, working peers, `ygg0`, rule `1000`, the `200::/7` route in table `200`, the three firewall rules and real overlay connectivity. The public HTTP endpoint is a test target whose availability may change. With multicast enabled and a compatible router on Wi-Fi, check that the local TLS peer returns too.
 
-If the new version fails:
+For this branch's ULA handler, also verify that an active matching VPN TUN interface still has `fd42::1/128`. For the usual `tun0`:
 
 ```sh
-sv down yggdrasil
+su -c "$PREFIX/bin/ip -6 addr show dev tun0"
 ```
 
-Restore the old daemon:
+If the active VPN uses another `tunN` name, inspect that interface instead. The handler remains in the existing runit script.
+
+With the VPN active, inspect the **public outgoing peer** sockets (TCP and UDP):
 
 ```sh
-install -m 755 "$HOME/yggdrasil-update-backup/yggdrasil" "$PREFIX/bin/yggdrasil"
+su -c "$PREFIX/bin/ss -tnep"
+su -c "$PREFIX/bin/ss -ulnep"
 ```
 
-Restore the old control utility:
+Their marks must include Android's `protectedFromVpn` bit (`0x20000`; the tested public sockets show `fwmark:0x20000`) and TCP source addresses must belong to the physical network. QUIC UDP sockets may appear as unconnected/wildcard sockets in `ss`; use a bounded packet capture to establish their actual physical path. A version suffix or route lookup alone does not prove bypass. Check that applications requiring the VPN still use its address. After an actual version change, verify public-peer traffic outside the VPN, Wi-Fi/mobile reconnection and a call with the VPN active; retain the backup until those checks pass.
+
+### 19.6 Roll back if the new version fails
+
+Set `ygg_backup_dir` to the saved backup path if this is a new shell, then restore both binaries:
 
 ```sh
-install -m 755 "$HOME/yggdrasil-update-backup/yggdrasilctl" "$PREFIX/bin/yggdrasilctl"
+sv -w 25 down yggdrasil &&
+install -m 755 "$ygg_backup_dir/yggdrasil" "$PREFIX/bin/yggdrasil" &&
+install -m 755 "$ygg_backup_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
+sv -w 25 up yggdrasil
 ```
 
-Restore the configuration if it was changed:
+The normal update never changes the configuration. If you deliberately edited it for the new release, also restore the saved config:
 
 ```sh
-install -m 600 "$HOME/yggdrasil-update-backup/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf"
+sv -w 25 down yggdrasil &&
+install -m 600 "$ygg_backup_dir/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf" &&
+sv -w 25 up yggdrasil
 ```
 
-Start the old version:
-
-```sh
-sv up yggdrasil
-```
-
-Verify:
-
-```sh
-sv status yggdrasil
-```
-
-### 19.12 Cleanup after a successful update
-
-After the updated version has been stable long enough that you no longer need immediate rollback:
-
-```sh
-rm -rf "$HOME/yggdrasil-go-update"
-```
-
-Then, when you are satisfied that the rollback copy is no longer needed:
-
-```sh
-rm -rf "$HOME/yggdrasil-update-backup"
-```
+Repeat the checks in section 19.5 with the restored version. Keep the source and backup directories until no rollback is needed; remove only the specific directories you recorded, never an older backup as part of preparing the next update.
 
 ---
 

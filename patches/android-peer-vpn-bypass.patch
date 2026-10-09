@@ -1,3 +1,78 @@
+diff --git a/src/core/link_quic.go b/src/core/link_quic.go
+index ffe7a2c..683ccdb 100644
+--- a/src/core/link_quic.go
++++ b/src/core/link_quic.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/url"
++	"runtime"
+ 	"time"
+ 
+ 	"github.com/Arceliar/phony"
+@@ -22,6 +23,16 @@ type linkQUIC struct {
+ type linkQUICStream struct {
+ 	*quic.Conn
+ 	*quic.Stream
++	packetConn net.PacketConn
++}
++
++func (l *linkQUICStream) Close() error {
++	err := l.Stream.Close()
++	if l.packetConn != nil {
++		_ = l.Conn.CloseWithError(0, "")
++		_ = l.packetConn.Close()
++	}
++	return err
+ }
+ 
+ type linkQUICListener struct {
+@@ -57,17 +68,42 @@ func (l *linkQUIC) dial(ctx context.Context, url *url.URL, info linkInfo, option
+ 		tlsconfig.MinVersion = tls.VersionTLS12
+ 		tlsconfig.MaxVersion = tls.VersionTLS13
+ 		hostport := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+-		qc, err := quic.DialAddr(ctx, hostport, l.tlsconfig, l.quicconfig)
++		var qc *quic.Conn
++		var packetConn net.PacketConn
++		var err error
++		if runtime.GOOS == "android" {
++			// Protect the UDP socket before QUIC sends its first packet.
++			lc := net.ListenConfig{Control: l.tcp.getControl(info.sintf)}
++			network, local := "udp4", "0.0.0.0:0"
++			if ip.To4() == nil {
++				network, local = "udp6", "[::]:0"
++			}
++			packetConn, err = lc.ListenPacket(ctx, network, local)
++			if err != nil {
++				return nil, err
++			}
++			qc, err = quic.Dial(ctx, packetConn, &net.UDPAddr{IP: ip, Port: port, Zone: info.sintf}, l.tlsconfig, l.quicconfig)
++		} else {
++			qc, err = quic.DialAddr(ctx, hostport, l.tlsconfig, l.quicconfig)
++		}
+ 		if err != nil {
++			if packetConn != nil {
++				_ = packetConn.Close()
++			}
+ 			return nil, err
+ 		}
+ 		qs, err := qc.OpenStreamSync(ctx)
+ 		if err != nil {
++			if packetConn != nil {
++				_ = qc.CloseWithError(1, "stream error")
++				_ = packetConn.Close()
++			}
+ 			return nil, err
+ 		}
+ 		return &linkQUICStream{
+-			Conn:   qc,
+-			Stream: qs,
++			Conn:       qc,
++			Stream:     qs,
++			packetConn: packetConn,
+ 		}, nil
+ 	})
+ }
 diff --git a/src/core/link_tcp.go b/src/core/link_tcp.go
 index 7cbb1ba..b171820 100644
 --- a/src/core/link_tcp.go

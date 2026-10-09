@@ -6,7 +6,7 @@
 
 Minimal installation procedure without explanations or verification steps.
 
-This branch includes direct TCP peer transport outside an Android VPN, the event-driven ULA handler and the existing firewall. Android chooses Wi-Fi or mobile data without an extra switching service. [Transport details and verification](DIRECT-TRANSPORT.md).
+This branch includes direct TCP-based and QUIC/UDP peer transport outside an Android VPN, the event-driven ULA handler and the existing firewall. Android chooses Wi-Fi or mobile data without an extra switching service. [Transport details and verification](DIRECT-TRANSPORT.md).
 
 ## 1. Requirements
 
@@ -57,7 +57,7 @@ cd ~/yggdrasil-go
 ```sh
 git apply --check ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
 git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
-PKGVER=0.5.14-direct.2 ./build -p -l "-checklinkname=0"
+PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ```
 
 ## 4. Create the configuration
@@ -72,7 +72,7 @@ The generation command below is for a new node. When reinstalling, back up the i
 nano ~/yggdrasil.conf
 ```
 
-Add **2–3 current TCP IPv4 peers** from:
+Add **2–3 current nearby peers** using a supported transport from:
 
 https://github.com/yggdrasil-network/public-peers
 
@@ -96,7 +96,7 @@ MulticastInterfaces: [
 ]
 ```
 
-Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. QUIC is not covered by this patch.
+Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. The patch covers all outgoing peer schemes in v0.5.14: TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC; UNIX sockets are local. For SOCKS, the marked socket reaches the proxy; its onward route is controlled by that proxy. [Coverage](README.md#104-direct-peer-transport).
 
 Multicast advertises and discovers local Yggdrasil nodes on Wi-Fi (`wlanN`) through IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` selects the local TCP port automatically; keep the regular `Listen: []`. A direct local peer connection lets a compatible OpenWrt status module show the phone's `node` address. The Wi-Fi regex only limits discovery: public peers still work over Wi-Fi or mobile data. No extra service or firewall rule is needed. To disable discovery, use `MulticastInterfaces: []`. [Details](README.md#wi-fi-multicast-discovery).
 
@@ -435,3 +435,9 @@ Reboot Android normally.
 Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
 
 After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall from this branch and full Android reboot passed on the tested phone; verify your own installation too.
+
+## 12. Updating Yggdrasil
+
+Follow [README section 19](README.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
+
+This profile must preserve the outgoing TCP-based and QUIC/UDP socket patch. It is tested on v0.5.14; check and adapt it for a new release before building. A clean patch application or version suffix is not proof of VPN bypass: verify the physical peer sockets/traffic with the VPN active. An unpatched binary removes bypass.

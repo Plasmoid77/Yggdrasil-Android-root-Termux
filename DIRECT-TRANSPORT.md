@@ -2,11 +2,30 @@
 
 The complete installation procedure in this branch's [README](README.md) and [QUICKSTART](QUICKSTART.md) includes this patch. The commands below also describe applying it to an existing node.
 
-For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks outgoing TCP peer sockets with Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Android chooses the physical network. Normal `Peers` are used; interface names are not pinned.
+For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks outgoing TCP-based and QUIC/UDP peer sockets with Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Android chooses the physical network. Normal `Peers` are used; interface names are not pinned.
 
 The existing runit service, ULA handler and firewall remain unchanged. This adds no network switching daemon or polling loop. Socket setup errors stop the connection. Other Termux/root processes keep their existing VPN path; no global routing or firewall bypass is installed.
 
-The patch covers TCP and transports that use its dialer, including TLS. **QUIC is not covered.** Use TCP IPv4 literals for public peers, empty `InterfacePeers` and empty regular `Listen`. Wi-Fi multicast discovery is also enabled in the guide; its local peer connections use TLS/TCP. A hostname can still cause DNS resolution through the VPN. Preserve the existing private key and admin socket.
+The patch covers every outgoing peer scheme supported by Yggdrasil v0.5.14:
+
+| Peer scheme | Local socket / VPN handling |
+| --- | --- |
+| `tcp://` | Marked outgoing TCP socket |
+| `tls://` | TLS over the same marked TCP dialer |
+| `ws://` | WebSocket over the same marked TCP dialer |
+| `wss://` | WebSocket/TLS over the same marked TCP dialer |
+| `socks://` | Marked TCP connection to the SOCKS proxy |
+| `sockstls://` | Marked TCP connection to the SOCKS proxy, then TLS |
+| `quic://` | Marked UDP socket created before the QUIC handshake |
+| `unix://` | Local IPC; no IP socket or VPN route |
+
+Only the daemon's outgoing transport sockets get this handling. It does not mark application UDP, all root/Termux traffic or future transports added upstream. UDP calls addressed to Yggdrasil already enter `ygg0` through rule `1000`; the peer transport carries those packets whether the peer uses TCP or QUIC.
+
+For QUIC, the daemon creates the UDP socket with the same Android socket control before passing it to quic-go. Socket-control failures abort the dial; failed handshakes and closed outgoing streams release the owned UDP socket. Non-Android QUIC dialing keeps upstream behavior.
+
+Hostnames can still resolve through the VPN. SOCKS and environment HTTP proxies are intermediary services: the marked local connection does not control how the proxy itself reaches its destination. `unix://` is local and needs no bypass. The default guide keeps regular `Listen: []`; it does not expose public incoming listeners. Preserve the private key and admin socket.
+
+The default example uses IPv4 TCP peers, empty `InterfacePeers` and empty regular `Listen`. Wi-Fi multicast discovers local TLS/TCP peers. You may select other supported transports in `Peers` without disabling the socket patch.
 
 The bit layout comes from Android's [Fwmark.h](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/include/Fwmark.h). This requires root socket privileges and was tested with Amnezia Premium IPv4-only on LineageOS 23 / Android 16, arm64. Check the actual socket path with your VPN.
 
@@ -19,7 +38,7 @@ guide_patch="$PWD/patches/android-peer-vpn-bypass.patch"
 cd ~/yggdrasil-go
 git apply --check "$guide_patch"
 git apply "$guide_patch"
-PKGVER=0.5.14-direct.2 ./build -p -l "-checklinkname=0"
+PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ./yggdrasil -version
 ```
 
@@ -35,7 +54,7 @@ cp -p "$PREFIX/etc/yggdrasil.conf" "$backup_dir/yggdrasil.conf"
 chmod 600 "$backup_dir/yggdrasil" "$backup_dir/yggdrasil.conf"
 ```
 
-Edit the existing configuration. Do not generate a new identity. Use two or three current public TCP IPv4 peers in `Peers`, then set these fields:
+Edit the existing configuration. Do not generate a new identity. Use two or three current nearby peers using any supported transport in `Peers`, then set these fields:
 
 ```text
 InterfacePeers: {}
@@ -66,11 +85,14 @@ sv -w 25 up yggdrasil
 ```sh
 su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
 su -c "$PREFIX/bin/ss -tnep"
+su -c "$PREFIX/bin/ss -ulnep"
 ```
 
-The public peers should be up. Their TCP sockets should have `fwmark:0x20000` and a physical-network source address. Discovered LAN peers appear separately as link-local TLS connections on Wi-Fi. Check that other applications which require the VPN still use its address.
+The public peers should be up. Outgoing TCP and QUIC UDP sockets should carry the `protectedFromVpn` bit (`0x20000`). TCP shows its physical source address directly; unconnected QUIC UDP sockets can show a wildcard address, so confirm the actual path by capturing packets to the chosen peer on `any` and checking the interface. Discovered LAN peers appear separately as link-local TLS connections on Wi-Fi. Check that other applications which require the VPN still use its address.
 
 With the VPN enabled, switch Wi-Fi off and back on. Verify peer reconnection and the new physical source address **without restarting Yggdrasil**. Compare the daemon PID before and after. An existing connection may need time to reconnect; a route lookup alone does not prove handover.
+
+The earlier `direct.2` build passed the following handover, latency, call, clean-install, reboot and multicast checks. They have not all been repeated on `direct.3`.
 
 On the tested phone, both transitions passed with the same daemon PID. The overlay HTTP endpoint remained reachable after each transition. Twenty-request ping measurements were:
 
@@ -89,6 +111,20 @@ Conversations calls were verified separately on Wi-Fi with Amnezia XRay and Amne
 A clean reinstall from the published branch and a full Android reboot passed on 2026-10-09. An early Termux:Boot snapshot, about 25 seconds after boot, showed the service running with both peers connected through physical Wi-Fi and the three firewall rules restored. Post-reboot checks confirmed the original node identity, rule `1000`, table `200`, overlay HTTP 200 and automatic ULA restoration after the VPN connected. A bounded capture recorded peer TCP traffic only on `wlan0`, with none on the VPN interface. Other applications retained their VPN connection. The one-time diagnostic script removed itself; it is not part of the installation or a permanent helper.
 
 The latency, handover, call, clean-install and reboot tests above used `MulticastInterfaces: []`. Wi-Fi multicast was enabled and checked separately on 2026-10-09: the same patched binary automatically established a direct local peer connection with the OpenWrt router, while both public peers stayed up. A 15-second capture showed discovery and peer traffic only on `wlan0`; node identity, firewall, rule `1000`, table `200` and VPN ULA were preserved, and Codex retained its VPN connection. This configuration change needs only a Yggdrasil restart; it adds no helper service. Those earlier tests were not repeated after enabling multicast.
+
+### All outgoing peer transports in direct.3
+
+On 2026-10-09, the QUIC socket path was added to the same v0.5.14 patch. The runtime diff touches three source files: 56 added lines and 7 removed lines. It adds no permanent service, routing rule, firewall rule or timer. TCP socket setup is unchanged from `direct.2`.
+
+Local Android/root fixtures passed real payload round trips and socket mark checks for TCP, TLS, WS, WSS, SOCKS and SOCKS+TLS. QUIC passed over IPv4 and IPv6, including owned UDP socket closure, repeated failed-dial cleanup and refusal to proceed without root socket-mark privileges. UNIX IPC and the existing core test suite also passed.
+
+An isolated headless node then established a real public QUIC peer outside the active VPN. Its capture contained 85 packets on `wlan0`, including replies, and none on `tun0`; its UDP sockets carried `0x20000`. Some other public candidates timed out or refused connections: public-list membership does not guarantee availability.
+
+The installed `direct.3` daemon was subsequently checked with both existing TCP peers and a temporary pinned public QUIC peer. The QUIC peer was removed after verification; the persistent peer configuration stayed unchanged. Native identity, multicast, the configuration and service/boot file hashes, full firewall rules, ULA, routing, overlay HTTP and Codex's VPN connection were preserved. No test daemon or collector was retained. These checks establish QUIC operation and physical transport on the tested Wi-Fi connection; new QUIC mobile handover, calls and reboot were not performed.
+
+## Updating to another upstream release
+
+Follow [README section 19](README.md#19-updating-yggdrasil) for the complete update and rollback procedure. Build in a fresh directory, preserve the installed configuration/key and replace both binaries only after validation. This patch is tested on v0.5.14: review and check it against the selected new release before applying it. If it no longer applies, port and review it or keep the working release; do not install an unpatched build as an equivalent replacement. Textual patch success and a local version suffix do not prove the new binary bypasses the VPN. Verify the actual public peer socket marks and physical traffic, local multicast, network reconnection and a call with the VPN active before discarding the backup.
 
 ## Restore
 
