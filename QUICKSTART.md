@@ -70,6 +70,22 @@ Peers: [
 ]
 ```
 
+Enable built-in Wi-Fi multicast discovery in the existing configuration object:
+
+```text
+MulticastInterfaces: [
+  {
+    Regex: "^wlan[0-9]+$"
+    Beacon: true
+    Listen: true
+    Port: 0
+    Priority: 0
+  }
+]
+```
+
+This advertises and discovers local nodes on `wlanN` using IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` chooses the local TCP port automatically; multicast works even with an empty regular `Listen` field. Keep public peers for connectivity without a local peer. A direct connection to a compatible OpenWrt router lets its status module show the phone's `node` address. No extra helper service or `ygg0` firewall rule is needed. Set `MulticastInterfaces: []` to disable discovery. [Details](README.md#wi-fi-multicast-discovery).
+
 Set:
 
 ```text
