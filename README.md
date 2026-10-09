@@ -1816,275 +1816,125 @@ The guide intentionally does not alter the rest of Android's firewall topology.
 
 ## 19. Updating Yggdrasil
 
-Yggdrasil does not provide a built-in update notification mechanism, so check upstream releases periodically:
+Check [upstream releases and release notes](https://github.com/yggdrasil-network/yggdrasil-go/releases), including the required Go version, configuration changes and peer/protocol compatibility. Choose a stable release tag deliberately; the examples below use the placeholder `vX.Y.Z`. They do not claim that an unreleased or untested version is compatible.
 
-https://github.com/yggdrasil-network/yggdrasil-go/releases
+Use the instructions for your installed profile. `main` builds upstream Yggdrasil; `webrtc-vpn-compat` adds the runit ULA handler; `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets. An upstream binary installed over a direct build removes that socket patch. [Direct profile](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass#19-updating-yggdrasil).
 
-Do **not** blindly replace a working root networking daemon.
+A normal update builds separately, validates the existing configuration, saves a rollback copy, then replaces **both** `yggdrasil` and `yggdrasilctl`. Keep the configuration, private key, `Peers`, `MulticastInterfaces`, `IfName`, `AdminListen`, service/boot scripts and firewall. Do not run `-genconf`: preserving the key preserves the node address. No full reinstall or reboot is needed for a normal binary-only update.
 
-The safe update model is:
+Run the following stages in the same Termux shell, as its normal user. Save the printed source and backup paths; in a new shell, set `ygg_update_dir` and `ygg_backup_dir` to those paths again. If any command fails, stop at that stage; do not continue to installation.
 
-```text
-build the new version separately
-              │
-              ▼
-verify new binaries and existing config
-              │
-              ▼
-backup current binaries and config
-              │
-              ▼
-      sv down yggdrasil
-              │
-              ▼
-       install new binaries
-              │
-              ▼
-       sv up yggdrasil
-              │
-              ▼
-     post-update verification
-          ┌───┴───┐
-          │       │
-      success   failure
-          │       │
-          ▼       ▼
-    keep update  rollback
-```
+### 19.1 Clone the selected release into a fresh directory
 
-### 19.1 Do not regenerate the configuration during a normal update
-
-Your Yggdrasil identity is derived from the cryptographic keypair stored in the configuration.
-
-Regenerating the config creates a new identity and therefore a different Yggdrasil IPv6 address.
-
-Keep:
-
-```text
-$PREFIX/etc/yggdrasil.conf
-```
-
-unless you intentionally want a new node identity.
-
-### 19.2 Clone the new release separately
-
-Replace:
-
-```text
-vX.Y.Z
-```
-
-with the release you intentionally selected.
+Replace `vX.Y.Z` before running this block. A fresh directory preserves earlier source trees and backups.
 
 ```sh
-cd ~
+ygg_release='vX.Y.Z'
+ygg_update_dir=$(mktemp -d "$HOME/yggdrasil-source.XXXXXX")
+printf 'Source: %s\n' "$ygg_update_dir"
+git clone --depth 1 --branch "$ygg_release" https://github.com/yggdrasil-network/yggdrasil-go.git "$ygg_update_dir"
 ```
+
+### 19.2 Build and check the Android binaries
+
+Check the selected release's build instructions and Go requirement. The commands below retain this guide's Android PIE build and the linker workaround used for v0.5.14; a future release may need different flags. Build in Termux with `GOOS=android`, the phone's `GOARCH` and `CGO_ENABLED=1`. A generic Linux/arm64 release binary is not this Android build.
 
 ```sh
-rm -rf ~/yggdrasil-go-update
+(cd "$ygg_update_dir" && ./build -p -l "-checklinkname=0")
 ```
+
+Check both binaries before stopping the running daemon:
 
 ```sh
-git clone --depth 1 --branch vX.Y.Z https://github.com/yggdrasil-network/yggdrasil-go.git ~/yggdrasil-go-update
+"$ygg_update_dir/yggdrasil" -version
+go version -m "$ygg_update_dir/yggdrasil"
+go version -m "$ygg_update_dir/yggdrasilctl"
 ```
+
+Confirm the intended version, `GOOS=android`, the phone's architecture (arm64 on the tested device) and `CGO_ENABLED=1`. Build/metadata failures leave the current installation running.
+
+### 19.3 Save a private rollback copy and validate the existing configuration
 
 ```sh
-cd ~/yggdrasil-go-update
+ygg_backup_dir=$(mktemp -d "$HOME/yggdrasil-backup.XXXXXX")
+printf 'Backup: %s\n' "$ygg_backup_dir"
+cp -p "$PREFIX/bin/yggdrasil" "$ygg_backup_dir/yggdrasil" &&
+cp -p "$PREFIX/bin/yggdrasilctl" "$ygg_backup_dir/yggdrasilctl" &&
+cp -p "$PREFIX/etc/yggdrasil.conf" "$ygg_backup_dir/yggdrasil.conf" &&
+chmod 600 "$ygg_backup_dir/yggdrasil.conf"
 ```
 
-### 19.3 Build it
+The directory created by `mktemp -d` is private. Never publish its configuration or key. Keep it until the new version is known to work.
 
-For a release that still requires the same linker workaround:
+Parse the live configuration with the candidate and compare its derived node address with the installed binary's result:
 
 ```sh
-./build -p -l "-checklinkname=0"
+"$ygg_update_dir/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -normaliseconf >/dev/null &&
+"$PREFIX/bin/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -address > "$ygg_backup_dir/address.before" &&
+"$ygg_update_dir/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -address > "$ygg_backup_dir/address.candidate" &&
+cmp "$ygg_backup_dir/address.before" "$ygg_backup_dir/address.candidate" &&
+echo CONFIG_OK
 ```
 
-Do not assume forever that every future version needs exactly the same build flags. Check the release notes first.
+Only continue after `CONFIG_OK`. Normalized output is discarded; the installed config is not overwritten. If release notes require a config change, back it up first, make that change deliberately and validate again. Address comparison checks identity, not all future configuration semantics.
 
-### 19.4 Verify the new binaries before touching the running service
+### 19.4 Replace only the two binaries
+
+This interrupts Yggdrasil briefly. Other Termux services remain running.
 
 ```sh
-./yggdrasil -version
+sv -w 25 down yggdrasil &&
+install -m 755 "$ygg_update_dir/yggdrasil" "$PREFIX/bin/yggdrasil" &&
+install -m 755 "$ygg_update_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
+sv -w 25 up yggdrasil
 ```
 
-```sh
-go version -m ./yggdrasil | grep -E 'CGO_ENABLED|GOOS|GOARCH'
-```
+The chained commands stop on failure. If installation fails after the service stops, restore **both** old binaries with section 19.6. This is a manual update, not an automatic rollback script.
 
-```sh
-go version -m ./yggdrasilctl | grep -E 'CGO_ENABLED|GOOS|GOARCH'
-```
-
-### 19.5 Check the existing configuration with the new binary
-
-```sh
-./yggdrasil -useconffile "$PREFIX/etc/yggdrasil.conf" -normaliseconf >/dev/null && echo CONFIG_OK
-```
-
-Expected:
-
-```text
-CONFIG_OK
-```
-
-Do not automatically write normalized output back into the config during an update.
-
-If a release changes configuration semantics, read its release notes and make deliberate changes.
-
-### 19.6 Create a rollback backup
-
-```sh
-rm -rf "$HOME/yggdrasil-update-backup"
-```
-
-```sh
-mkdir -p "$HOME/yggdrasil-update-backup"
-```
-
-```sh
-cp "$PREFIX/bin/yggdrasil" "$HOME/yggdrasil-update-backup/yggdrasil"
-```
-
-```sh
-cp "$PREFIX/bin/yggdrasilctl" "$HOME/yggdrasil-update-backup/yggdrasilctl"
-```
-
-```sh
-cp "$PREFIX/etc/yggdrasil.conf" "$HOME/yggdrasil-update-backup/yggdrasil.conf"
-```
-
-The config backup is especially important because it contains the node identity.
-
-### 19.7 Stop the current daemon
-
-```sh
-sv down yggdrasil
-```
-
-Confirm:
+### 19.5 Verify before keeping the update
 
 ```sh
 sv status yggdrasil
-```
-
-### 19.8 Install the new binaries
-
-```sh
-install -m 755 ~/yggdrasil-go-update/yggdrasil "$PREFIX/bin/yggdrasil"
-```
-
-```sh
-install -m 755 ~/yggdrasil-go-update/yggdrasilctl "$PREFIX/bin/yggdrasilctl"
-```
-
-The runit scripts, firewall and Termux:Boot files do not need to change for a normal binary-only update.
-
-### 19.9 Start the updated version
-
-```sh
-sv up yggdrasil
-```
-
-Check:
-
-```sh
-sv status yggdrasil
-```
-
-```sh
 "$PREFIX/bin/yggdrasil" -version
-```
-
-### 19.10 Post-update verification
-
-Check the interface:
-
-```sh
-su -c 'ip -6 addr show dev ygg0'
-```
-
-Check rule `1000`:
-
-```sh
-su -c 'ip -6 rule show' | grep '^1000:'
-```
-
-Check table `200`:
-
-```sh
-su -c 'ip -6 route show table 200'
-```
-
-Check peers:
-
-```sh
+su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getSelf"
 su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
-```
-
-Check actual traffic:
-
-```sh
-curl -6 --noproxy '*' --connect-timeout 10 -I 'http://[324:71e:281a:9ed3::ace]/'
-```
-
-Check that the firewall is still present:
-
-```sh
+su -c "$PREFIX/bin/ip -6 addr show dev ygg0"
+su -c "$PREFIX/bin/ip -6 rule show"
+su -c "$PREFIX/bin/ip -6 route show table 200"
 su -c '/system/bin/ip6tables -S INPUT'
+curl -6 --noproxy '*' --max-time 15 -I 'http://[324:71e:281a:9ed3::ace]/'
 ```
 
-### 19.11 Rollback
+Allow time for peers to reconnect. Confirm the original native node address, working peers, `ygg0`, rule `1000`, the `200::/7` route in table `200`, the three firewall rules and real overlay connectivity. The public HTTP endpoint is a test target whose availability may change. With multicast enabled and a compatible router on Wi-Fi, check that the local TLS peer returns too.
 
-If the new version fails:
+For this branch's ULA handler, also verify that an active matching VPN TUN interface still has `fd42::1/128`. For the usual `tun0`:
 
 ```sh
-sv down yggdrasil
+su -c "$PREFIX/bin/ip -6 addr show dev tun0"
 ```
 
-Restore the old daemon:
+If the active VPN uses another `tunN` name, inspect that interface instead. The handler remains in the existing runit script.
+
+### 19.6 Roll back if the new version fails
+
+Set `ygg_backup_dir` to the saved backup path if this is a new shell, then restore both binaries:
 
 ```sh
-install -m 755 "$HOME/yggdrasil-update-backup/yggdrasil" "$PREFIX/bin/yggdrasil"
+sv -w 25 down yggdrasil &&
+install -m 755 "$ygg_backup_dir/yggdrasil" "$PREFIX/bin/yggdrasil" &&
+install -m 755 "$ygg_backup_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
+sv -w 25 up yggdrasil
 ```
 
-Restore the old control utility:
+The normal update never changes the configuration. If you deliberately edited it for the new release, also restore the saved config:
 
 ```sh
-install -m 755 "$HOME/yggdrasil-update-backup/yggdrasilctl" "$PREFIX/bin/yggdrasilctl"
+sv -w 25 down yggdrasil &&
+install -m 600 "$ygg_backup_dir/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf" &&
+sv -w 25 up yggdrasil
 ```
 
-Restore the configuration if it was changed:
-
-```sh
-install -m 600 "$HOME/yggdrasil-update-backup/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf"
-```
-
-Start the old version:
-
-```sh
-sv up yggdrasil
-```
-
-Verify:
-
-```sh
-sv status yggdrasil
-```
-
-### 19.12 Cleanup after a successful update
-
-After the updated version has been stable long enough that you no longer need immediate rollback:
-
-```sh
-rm -rf "$HOME/yggdrasil-go-update"
-```
-
-Then, when you are satisfied that the rollback copy is no longer needed:
-
-```sh
-rm -rf "$HOME/yggdrasil-update-backup"
-```
+Repeat the checks in section 19.5 with the restored version. Keep the source and backup directories until no rollback is needed; remove only the specific directories you recorded, never an older backup as part of preparing the next update.
 
 ---
 
