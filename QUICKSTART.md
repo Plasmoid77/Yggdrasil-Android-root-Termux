@@ -4,12 +4,21 @@
 >
 > **Guide by Plasmoid (Neuroslopped)**
 
-Minimal installation procedure without explanations or verification steps.
+Installation steps. See the [full installation guide](docs/INSTALL.md) for explanations and verification.
 
 ## 1. Requirements
 
 - Rooted Android with working `su -c`.
-- `Termux` and `Termux:Boot`; launch `Termux:Boot` at least once from the Android launcher.
+- Termux and the separate **Termux:Boot Android app**.
+
+Install Termux and Termux:Boot from the same signing source: F-Droid with F-Droid, or official GitHub builds with matching signatures. See [Termux installation requirements](https://github.com/termux/termux-app#installation).
+
+### Install and activate Termux:Boot first
+
+1. **Install Termux:Boot as an Android app**, using matching signatures with Termux. It is not installed by `pkg`.
+2. **Open Termux:Boot once through its launcher icon** to enable automatic execution at boot. Opening Termux does not replace this step.
+
+The steps below create both boot scripts and enable the service. After completing them, you do not need to open Termux after every reboot. [Official Termux:Boot instructions](https://github.com/termux/termux-boot#how-to-use).
 
 ## 2. Install packages
 
@@ -84,7 +93,7 @@ MulticastInterfaces: [
 ]
 ```
 
-This advertises and discovers local nodes on `wlanN` using IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` chooses the local TCP port automatically; multicast works even with an empty regular `Listen` field. Keep public peers for connectivity without a local peer. A direct connection to a compatible OpenWrt router lets its status module show the phone's `node` address. No extra helper service or `ygg0` firewall rule is needed. Set `MulticastInterfaces: []` to disable discovery. [Details](README.md#wi-fi-multicast-discovery).
+This advertises and discovers local nodes on `wlanN` using IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` chooses the local TCP port automatically; multicast works even with an empty regular `Listen` field. Keep public peers for connectivity without a local peer. A direct connection to a compatible OpenWrt router lets its status module show the phone's `node` address. No extra helper service or `ygg0` firewall rule is needed. Set `MulticastInterfaces: []` to disable discovery. [Details](docs/INSTALL.md#wi-fi-multicast-discovery).
 
 Set:
 
@@ -247,6 +256,8 @@ termux-wake-lock
 chmod +x "$HOME/.termux/boot/10-services.sh"
 ```
 
+The firewall script can also be executed manually from Termux to apply its rules to the current boot; see the [manual command and checks](docs/INSTALL.md#11-firewall). Opening Termux or starting the supervisor does not run that script; Termux:Boot supplies the automatic boot trigger. [Details](docs/INSTALL.md#123-manual-execution-and-shell-startup).
+
 ## 9. Start and enable Yggdrasil
 
 Start `termux-services` in the current Android session:
@@ -313,6 +324,6 @@ Termux:Boot will restore the firewall and start `termux-services`; `runit` will 
 
 ## 12. Updating Yggdrasil
 
-Follow [README section 19](README.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
+Follow [installation guide section 19](docs/INSTALL.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
 
-Use this branch's installed profile. A direct build needs the patch and checks from the [direct-vpn-bypass branch](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass#19-updating-yggdrasil), rather than an unpatched upstream replacement.
+Use this branch's installed profile. A direct build needs the patch and checks from the [direct-vpn-bypass branch](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/blob/direct-vpn-bypass/docs/INSTALL.md#19-updating-yggdrasil), rather than an unpatched upstream replacement.
