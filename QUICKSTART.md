@@ -4,16 +4,23 @@
 >
 > **Guide by Plasmoid (Neuroslopped)**
 
-Minimal installation procedure without explanations or verification steps.
+Installation steps. See the [full installation guide](docs/INSTALL.md) for explanations and verification.
 
 This branch includes direct TCP-based and QUIC/UDP peer transport outside an Android VPN, the event-driven ULA handler and the existing firewall. Android chooses Wi-Fi or mobile data without an extra switching service. [Transport details and verification](DIRECT-TRANSPORT.md).
 
 ## 1. Requirements
 
 - Rooted Android with working `su -c`.
-- `Termux` and `Termux:Boot`; launch `Termux:Boot` at least once from the Android launcher.
+- Termux and the separate **Termux:Boot Android app**.
 
 Use the same signing source for both APKs (F-Droid or official GitHub releases); mixed signatures prevent installation. [Termux installation requirements](https://github.com/termux/termux-app#installation).
+
+### Install and activate Termux:Boot first
+
+1. **Install Termux:Boot as an Android app**, using matching signatures with Termux. It is not installed by `pkg`.
+2. **Open Termux:Boot once through its launcher icon** to enable automatic execution at boot. Opening Termux does not replace this step.
+
+The steps below create both boot scripts and enable the service. After completing them, you do not need to open Termux after every reboot. [Official Termux:Boot instructions](https://github.com/termux/termux-boot#how-to-use).
 
 ## 2. Install packages
 
@@ -60,7 +67,7 @@ git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
 PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ```
 
-Use fresh source: apply the patch once. `git apply --check` only checks applicability; `git apply` changes source; `./build` produces both binaries for the installation step below. `PKGVER` labels the build, `-p` enables PIE and `-l` passes a linker option. VPN bypass comes from marking TCP and QUIC/UDP sockets in the modified source. [Command explanations and patch internals](README.md#5-build-yggdrasil-natively-for-android). For an existing node, preserve its key/configuration and follow [the update procedure](README.md#19-updating-yggdrasil).
+Use fresh source: apply the patch once. `git apply --check` only checks applicability; `git apply` changes source; `./build` produces both binaries for the installation step below. `PKGVER` labels the build, `-p` enables PIE and `-l` passes a linker option. VPN bypass comes from marking TCP and QUIC/UDP sockets in the modified source. [Command explanations and patch internals](docs/INSTALL.md#5-build-yggdrasil-natively-for-android). For an existing node, preserve its key/configuration and follow [the update procedure](docs/INSTALL.md#19-updating-yggdrasil).
 
 ## 4. Create the configuration
 
@@ -98,9 +105,9 @@ MulticastInterfaces: [
 ]
 ```
 
-Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. The patch covers all outgoing peer schemes in v0.5.14: TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC; UNIX sockets are local. For SOCKS, the marked socket reaches the proxy; its onward route is controlled by that proxy. [Coverage](README.md#104-direct-peer-transport).
+Use ordinary `Peers` without pinned interface names. IPv4 literals avoid peer DNS through the VPN. The patch covers all outgoing peer schemes in v0.5.14: TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC; UNIX sockets are local. For SOCKS, the marked socket reaches the proxy; its onward route is controlled by that proxy. [Coverage](docs/INSTALL.md#104-direct-peer-transport).
 
-Multicast advertises and discovers local Yggdrasil nodes on Wi-Fi (`wlanN`) through IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` selects the local TCP port automatically; keep the regular `Listen: []`. A direct local peer connection lets a compatible OpenWrt status module show the phone's `node` address. The Wi-Fi regex only limits discovery: public peers still work over Wi-Fi or mobile data. No extra service or firewall rule is needed. To disable discovery, use `MulticastInterfaces: []`. [Details](README.md#wi-fi-multicast-discovery).
+Multicast advertises and discovers local Yggdrasil nodes on Wi-Fi (`wlanN`) through IPv6 link-local UDP port 9001, then establishes TLS/TCP peer connections. `Port: 0` selects the local TCP port automatically; keep the regular `Listen: []`. A direct local peer connection lets a compatible OpenWrt status module show the phone's `node` address. The Wi-Fi regex only limits discovery: public peers still work over Wi-Fi or mobile data. No extra service or firewall rule is needed. To disable discovery, use `MulticastInterfaces: []`. [Details](docs/INSTALL.md#wi-fi-multicast-discovery).
 
 Set:
 
@@ -305,7 +312,7 @@ The ULA is a local compatibility address, not general IPv6 Internet access. Yggd
 
 New calls worked after switching both tested Amnezia VPNs. Enabling the tested IPv4-only VPN during an active call still left Conversations reconnecting; the script does not manage ICE recovery.
 
-See [README section 10.3](README.md#103-android-vpn--webrtcvoip-compatibility) for the reproduced problem, implementation, test results and limits.
+See [installation guide section 10.3](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) for the reproduced problem, implementation, test results and limits.
 
 ## 7. Configure the firewall
 
@@ -360,6 +367,8 @@ termux-wake-lock
 ```sh
 chmod +x "$HOME/.termux/boot/10-services.sh"
 ```
+
+The firewall script can also be executed manually from Termux to apply its rules to the current boot; see the [manual command and checks](docs/INSTALL.md#11-firewall). Opening Termux or starting the supervisor does not run that script; Termux:Boot supplies the automatic boot trigger. [Details](docs/INSTALL.md#123-manual-execution-and-shell-startup).
 
 ## 9. Start and enable Yggdrasil
 
@@ -436,12 +445,12 @@ Reboot Android normally.
 
 Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
 
-After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall from this branch and full Android reboot passed on the tested phone; verify your own installation too.
+After reboot, follow [installation guide section 16](docs/INSTALL.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall from this branch and full Android reboot passed on the tested phone; verify your own installation too.
 
 A separate QUIC-only reboot with `0.5.14-direct.3` passed on 2026-10-10: Termux:Boot started the daemon and both peers automatically, with direct physical traffic, restored firewall/routing and the same node identity. The temporary QUIC test config was then replaced with the original TCP peers and Wi-Fi multicast. See [QUIC checks and call-test limits](DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot).
 
 ## 12. Updating Yggdrasil
 
-Follow [README section 19](README.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
+Follow [installation guide section 19](docs/INSTALL.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
 
 This profile must preserve the outgoing TCP-based and QUIC/UDP socket patch. It is tested on v0.5.14; check and adapt it for a new release before building. A clean patch application or version suffix is not proof of VPN bypass: verify the physical peer sockets/traffic with the VPN active. An unpatched binary removes bypass.

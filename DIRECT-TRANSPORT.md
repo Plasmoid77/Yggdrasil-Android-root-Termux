@@ -1,6 +1,6 @@
 # Direct Yggdrasil peer transport outside an Android VPN
 
-The complete installation procedure in this branch's [README](README.md) and [QUICKSTART](QUICKSTART.md) includes this patch. The commands below also describe applying it to an existing node.
+The complete installation procedure in this branch's [full installation guide](docs/INSTALL.md) and [QUICKSTART](QUICKSTART.md) includes this patch. The commands below also describe applying it to an existing node.
 
 For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks outgoing TCP-based and QUIC/UDP peer sockets with Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Android chooses the physical network. Normal `Peers` are used; interface names are not pinned.
 
@@ -70,7 +70,7 @@ MulticastInterfaces: [
 ]
 ```
 
-This enables built-in Wi-Fi discovery and advertisement using IPv6 link-local multicast. The regular `Listen: []` does not disable the listener created by multicast. The Wi-Fi regex does not bind public peers to Wi-Fi or add a network switching service. See [multicast details](README.md#wi-fi-multicast-discovery).
+This enables built-in Wi-Fi discovery and advertisement using IPv6 link-local multicast. The regular `Listen: []` does not disable the listener created by multicast. The Wi-Fi regex does not bind public peers to Wi-Fi or add a network switching service. See [multicast details](docs/INSTALL.md#wi-fi-multicast-discovery).
 
 Install the patched daemon and start the same service:
 
@@ -136,7 +136,7 @@ Post-reboot checks preserved the node address/key and hashes of both binaries, t
 
 ## Updating to another upstream release
 
-Follow [README section 19](README.md#19-updating-yggdrasil) for the complete update and rollback procedure. Build in a fresh directory, preserve the installed configuration/key and replace both binaries only after validation. This patch is tested on v0.5.14: review and check it against the selected new release before applying it. If it no longer applies, port and review it or keep the working release; do not install an unpatched build as an equivalent replacement. Textual patch success and a local version suffix do not prove the new binary bypasses the VPN. Verify the actual public peer socket marks and physical traffic, local multicast, network reconnection and a call with the VPN active before discarding the backup.
+Follow [installation guide section 19](docs/INSTALL.md#19-updating-yggdrasil) for the complete update and rollback procedure. Build in a fresh directory, preserve the installed configuration/key and replace both binaries only after validation. This patch is tested on v0.5.14: review and check it against the selected new release before applying it. If it no longer applies, port and review it or keep the working release; do not install an unpatched build as an equivalent replacement. Textual patch success and a local version suffix do not prove the new binary bypasses the VPN. Verify the actual public peer socket marks and physical traffic, local multicast, network reconnection and a call with the VPN active before discarding the backup.
 
 ## Restore
 
