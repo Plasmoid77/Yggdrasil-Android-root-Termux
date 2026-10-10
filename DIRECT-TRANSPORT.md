@@ -120,7 +120,19 @@ Local Android/root fixtures passed real payload round trips and socket mark chec
 
 An isolated headless node then established a real public QUIC peer outside the active VPN. Its capture contained 85 packets on `wlan0`, including replies, and none on `tun0`; its UDP sockets carried `0x20000`. Some other public candidates timed out or refused connections: public-list membership does not guarantee availability.
 
-The installed `direct.3` daemon was subsequently checked with both existing TCP peers and a temporary pinned public QUIC peer. The QUIC peer was removed after verification; the persistent peer configuration stayed unchanged. Native identity, multicast, the configuration and service/boot file hashes, full firewall rules, ULA, routing, overlay HTTP and Codex's VPN connection were preserved. No test daemon or collector was retained. These checks establish QUIC operation and physical transport on the tested Wi-Fi connection; new QUIC mobile handover, calls and reboot were not performed.
+The installed `direct.3` daemon was subsequently checked with both existing TCP peers and a temporary pinned public QUIC peer. That peer was removed after the initial verification; the persistent peer configuration stayed unchanged. Native identity, multicast, the configuration and service/boot file hashes, full firewall rules, ULA, routing, overlay HTTP and Codex's VPN connection were preserved. No test daemon or collector was retained. The additional QUIC-only checks below used separate temporary configurations.
+
+### QUIC handover, calls and reboot
+
+On 2026-10-09, a QUIC-only configuration with TCP peers and multicast disabled passed Wi-Fi → mobile → Wi-Fi checks without restarting Yggdrasil. Captures showed public-peer UDP on the physical interfaces and none on the VPN interface. The node identity, routing, three Yggdrasil firewall rules and VPN access were preserved. Short ping samples had packet loss and variable RTT; these results do not establish lossless handover or latency equivalence to TCP.
+
+Calls with VLESS/Xray, including Monocles/Conversations interoperability, were reported successful by the user. A further Wi-Fi call lasting more than an hour was reported successful on 2026-10-10; its VPN protocol was not confirmed. The bounded captures did not record the media of those calls, so these are user-reported call results. With AmneziaWG and two Russian QUIC peers, fresh connections to the actual XMPP server succeeded on mobile data and the application reported connected; a QUIC-only call with that VPN protocol was not separately confirmed.
+
+Some public peers timed out, and earlier attempts lost overlay reachability. The reference web endpoint and ICMP probes also failed in a normal TCP baseline while the XMPP server remained reachable. Their cause was not established. Check the actual application endpoint as well as peer status; a public-list entry or an `up` peer alone does not prove application readiness.
+
+On 2026-10-10, a full Android reboot passed with `direct.3`, two QUIC peers and TCP/multicast disabled. A one-time Termux:Boot observer recorded the service, both marked UDP sockets and both completed peer handshakes about 28 seconds after boot. A second snapshot showed table `200` and automatic ULA restoration after the VPN appeared. The early capture recorded 122 peer UDP packets on `wlan0`, none on the VPN interface, with no kernel capture drops. The observer only read state and removed its boot entry after completion.
+
+Post-reboot checks preserved the node address/key and hashes of both binaries, the config and service/boot scripts. They confirmed the three firewall rules, routing, ULA, a fresh XMPP connection, HTTP 200, 20/20 ICMP replies (126.654 ms mean RTT), physical QUIC traffic and continued VPN access for Codex. No manual service start or repair preceded these checks. After verification, the original TCP peer configuration with Wi-Fi multicast was restored; QUIC support remains in the binary.
 
 ## Updating to another upstream release
 

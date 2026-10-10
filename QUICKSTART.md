@@ -438,6 +438,8 @@ Termux:Boot will restore the firewall and start `termux-services`; `runit` will 
 
 After reboot, follow [README section 16](README.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall from this branch and full Android reboot passed on the tested phone; verify your own installation too.
 
+A separate QUIC-only reboot with `0.5.14-direct.3` passed on 2026-10-10: Termux:Boot started the daemon and both peers automatically, with direct physical traffic, restored firewall/routing and the same node identity. The temporary QUIC test config was then replaced with the original TCP peers and Wi-Fi multicast. See [QUIC checks and call-test limits](DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot).
+
 ## 12. Updating Yggdrasil
 
 Follow [README section 19](README.md#19-updating-yggdrasil): select a release, build both Android/cgo binaries in a fresh directory, back up the old binaries and config, validate the existing config and node address, then stop only Yggdrasil, install both binaries and restart it. Keep the private key, peers, multicast, service/boot scripts and firewall; do not regenerate the config. The section includes post-update checks and rollback commands.
