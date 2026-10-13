@@ -4,11 +4,13 @@
 
 Native Yggdrasil node on rooted Android without the Android VPN API.
 
-The goal of this guide is to run the regular Yggdrasil userspace router directly on Android, create a real `ygg0` TUN interface, route only the Yggdrasil address space through it, supervise the daemon with `runit`, start the service supervisor after reboot with Termux:Boot and apply the firewall in `run` before starting Yggdrasil, and preserve Android's existing Internet/VPN routing policy.
+This guide runs the regular Yggdrasil userspace router directly on Android. It creates a real `ygg0` TUN interface and routes only Yggdrasil addresses through it. `runit` supervises the daemon. Termux:Boot starts the supervisor after reboot. `run` applies the firewall before starting Yggdrasil. Android keeps its existing Internet/VPN routing policy.
 
-The `ultimate` branch combines direct peer transport with one event-driven ULA handler for IPv4-only VPNs and the current physical Internet interface. v3 derives two different ULAs from the node identity: `fd43:` for the VPN and `fd42:` for the primary physical uplink. Firewall setup, previous-session takeover, batched Netlink handling and bounded logs are part of the same runit service. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the implementation, interface selection and tested limits.
+The `ultimate` branch combines direct peer transport with one event-driven ULA handler. The handler supports IPv4-only VPNs and the current physical Internet interface. v3 derives two different ULAs from the node identity: `fd43:` for the VPN and `fd42:` for the primary physical uplink.
 
-This branch also builds Yggdrasil v0.5.14 with a small socket patch for outgoing TCP-based and QUIC peers. Peer transport stays outside the Android VPN, while Android chooses Wi-Fi or mobile data. Other applications keep their existing VPN policy. No extra switching service is needed. [Transport details and measured results](../DIRECT-TRANSPORT.md).
+The same runit service sets up the firewall, takes over a previous session, batches Netlink events and limits log storage. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for details, interface selection and tested limits.
+
+This branch builds Yggdrasil v0.5.14 with a small socket patch for outgoing TCP-based and QUIC peers. Peer traffic stays outside the Android VPN. Android chooses Wi-Fi or mobile data. Other applications keep their VPN policy. No extra switching service is needed. [Transport details and measured results](../DIRECT-TRANSPORT.md).
 
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
@@ -21,7 +23,7 @@ This is a root-only setup. It does **not** use:
 - systemd;
 - a userspace VPN wrapper.
 
-The resulting setup behaves much closer to a normal Linux Yggdrasil installation, but integrates with Android and Termux.
+The setup works like a normal Linux Yggdrasil installation, with Android and Termux integration.
 
 ---
 
@@ -80,13 +82,13 @@ priority 1000
 to 200::/7 lookup 200
 ```
 
-All normal Android traffic keeps using Android's normal routing tables.
+Normal Android traffic keeps using Android's routing tables.
 
-Outgoing TCP-based and QUIC/UDP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers; they are not bound to fixed Wi-Fi or mobile interface names. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
+Outgoing TCP-based and QUIC/UDP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers. No fixed Wi-Fi or mobile interface names are used. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
 
-The service maintains node-derived `fd43:` VPN and `fd42:` primary physical /128 helpers on eligible IPv4-only interfaces. It preserves existing global-scope IPv6 and uses batched Netlink events without a polling timer. Primary selection excluded IMS and hotspot downstream on the tested phone. See section 10.3.
+The service adds /128 helpers derived from the node address to eligible IPv4-only interfaces: `fd43:` for VPNs and `fd42:` for the primary physical uplink. It preserves existing global-scope IPv6. It groups Netlink events into batches and uses no polling timer. Primary selection excluded IMS and hotspot downstream on the tested phone. See section 10.3.
 
-The Yggdrasil daemon is supervised by `runit`, so it can be controlled with:
+`runit` supervises the Yggdrasil daemon. Control it with:
 
 ```sh
 sv status yggdrasil
@@ -94,9 +96,9 @@ sv up yggdrasil
 sv down yggdrasil
 ```
 
-and restarted automatically if the supervised service exits.
+It restarts the service automatically if the supervised service exits.
 
-Incoming traffic from Yggdrasil is protected by a stateful IPv6 firewall:
+A stateful IPv6 firewall protects incoming traffic from Yggdrasil:
 
 ```text
 ESTABLISHED,RELATED -> ACCEPT
@@ -104,7 +106,7 @@ INVALID             -> DROP
 everything else     -> DROP
 ```
 
-The service applies the firewall before each daemon start, including starts triggered by a login shell. Automatic restart requires a live supervisor; see [previous-session takeover](#94-previous-session-takeover).
+The service applies the firewall before each daemon start, including starts from a login shell. Automatic restart needs a live supervisor. See [previous-session takeover](#94-previous-session-takeover).
 
 ---
 
@@ -143,14 +145,14 @@ Android boot
                 └── log/run → svlogd (bounded logs)
 ```
 
-The important separation is:
+The two components have separate roles:
 
 ```text
 Termux:Boot = one-shot boot initialization
 runit       = long-running service supervision
 ```
 
-Termux:Boot does not replace `runit`. It only starts the supervisor after Android boots.
+Termux:Boot starts the supervisor after Android boots. It does not replace `runit`.
 
 ---
 
@@ -162,21 +164,23 @@ You need:
 - Termux, including its Bash shell;
 - the separate **Termux:Boot Android app**, installed and activated as described below.
 
-> **Required for automatic startup after reboot:** install Termux:Boot as an Android app and **open its launcher icon once**. Opening Termux does not activate Termux:Boot, and `pkg` does not install the Android app. [Official instructions](https://github.com/termux/termux-boot#how-to-use).
+> **For automatic startup after reboot:** install Termux:Boot as an Android app and **open its launcher icon once**. Opening Termux does not activate Termux:Boot. You cannot install the Android app with `pkg`. [Official instructions](https://github.com/termux/termux-boot#how-to-use).
 
-The following sections create the single `10-services.sh` boot script and enable the service. Complete [firewall setup](#11-firewall), [Termux:Boot setup](#12-autostart-with-termuxboot) and [first launch](#13-first-launch) before the reboot check. With those steps complete, you do not need to open Termux after every reboot.
+The following sections create one `10-services.sh` boot script and enable the service. Complete [firewall setup](#11-firewall), [Termux:Boot setup](#12-autostart-with-termuxboot) and [first launch](#13-first-launch) before checking reboot. You then do not need to open Termux after every reboot.
 
-Install Termux and Termux:Boot from the same signing source: F-Droid with F-Droid, or the official GitHub releases with GitHub. Mixing them can produce an "unknown error" because their shared Android UID requires matching APK signatures. See [Termux installation requirements](https://github.com/termux/termux-app#installation).
+Install Termux and Termux:Boot from the same signing source: both from F-Droid or both from official GitHub releases. Mixed signatures can cause an "unknown error". The apps share an Android UID and need matching APK signatures. See [Termux installation requirements](https://github.com/termux/termux-app#installation).
 
-This guide assumes root is already configured and working.
+Root must already be configured and working.
 
 ### 3.1 Optional Android child process restrictions
 
-Android 12+ can kill Termux child processes through the phantom process killer; low-memory killing and ROM-specific background restrictions can also remove the supervisor. In the observed Android 16 incident, both `runsvdir` and `runsv yggdrasil` were killed while the root Yggdrasil session survived. The next login restored supervision. v3 handles that surviving session before touching its network state; it cannot restart a dead supervisor by itself. [Takeover details](#94-previous-session-takeover).
+Android 12+ can kill Termux child processes through the phantom process killer. Low memory and ROM-specific background restrictions can also kill the supervisor.
 
-Disabling phantom process monitoring is **optional**. It changes a system-wide restriction for **all apps**, allowing more child processes and potentially more resource use; it does not prevent every type of process killing. Keeping the default is supported, with the temporary loss of restart protection described above.
+In the observed Android 16 incident, both `runsvdir` and `runsv yggdrasil` were killed. The root Yggdrasil session survived. The next login restored supervision. v3 handles a surviving session before changing its network state. It cannot restart a dead supervisor itself. [Takeover details](#94-previous-session-takeover).
 
-On Android 14+, Developer options may offer **Disable child process restrictions**. Turning it on disables this monitor. A root command with equivalent monitoring behavior is:
+Disabling phantom process monitoring is **optional** and affects **all apps**. It allows more child processes, which may use more resources. It does not prevent every type of process killing. You can keep the default, with the temporary loss of restart protection described above.
+
+On Android 14+, Developer options may offer **Disable child process restrictions**. Turn it on to disable this monitor. The following root command has equivalent monitoring behavior:
 
 ```sh
 su -c 'settings get global settings_enable_monitor_phantom_procs'
@@ -189,22 +193,24 @@ Record the previous value before changing it. If it was `null`, remove the overr
 su -c 'settings delete global settings_enable_monitor_phantom_procs'
 ```
 
-If it was an explicit value, restore that value instead. The UI and command need not write the same storage: AOSP's [Settings controller](https://android.googlesource.com/platform/packages/apps/Settings/+/refs/heads/main/src/com/android/settings/development/PhantomProcessPreferenceController.java) toggles a feature property; [FeatureFlagUtils](https://android.googlesource.com/platform/frameworks/base/+/e4fadcbaec4197204e1f89ef7c9cb989b6afaa89/core/java/android/util/FeatureFlagUtils.java) gives the Global override priority. Restore through the method you used; ROM availability varies.
+If the previous value was explicit, restore that value instead. Restore it through the method you used.
 
-On Android 12–13, the older alternative raises the phantom-process limit instead of disabling all monitoring:
+The UI and command may store the setting differently. AOSP's [Settings controller](https://android.googlesource.com/platform/packages/apps/Settings/+/refs/heads/main/src/com/android/settings/development/PhantomProcessPreferenceController.java) toggles a feature property. [FeatureFlagUtils](https://android.googlesource.com/platform/frameworks/base/+/e4fadcbaec4197204e1f89ef7c9cb989b6afaa89/core/java/android/util/FeatureFlagUtils.java) gives the Global override priority. Availability varies by ROM.
+
+On Android 12–13, the older alternative raises the phantom-process limit. It does not disable all monitoring:
 
 ```sh
 su -c 'device_config get activity_manager max_phantom_processes'
 su -c 'device_config put activity_manager max_phantom_processes 2147483647'
 ```
 
-Again record the previous value. Restore it with `device_config put`, or if it was `null`, remove the override:
+Record the previous value here too. Restore it with `device_config put`. If it was `null`, remove the override:
 
 ```sh
 su -c 'device_config delete activity_manager max_phantom_processes'
 ```
 
-System configuration updates can overwrite DeviceConfig values. No global disabling of DeviceConfig synchronization is required by this guide. Some 12L/13 ROMs also support the monitoring flag. See the [AOSP Android 12 phantom process implementation](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android12-release/services/core/java/com/android/server/am/PhantomProcessList.java).
+System configuration updates can overwrite DeviceConfig values. This guide does not require disabling DeviceConfig synchronization globally. Some 12L/13 ROMs also support the monitoring flag. See the [AOSP Android 12 phantom process implementation](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android12-release/services/core/java/com/android/server/am/PhantomProcessList.java).
 
 ---
 
@@ -216,7 +222,7 @@ Update package metadata:
 pkg update
 ```
 
-Enable the Termux root package repository, which provides `tcpdump` used by the verification steps later in this guide:
+Enable the Termux root package repository. It provides `tcpdump` for the later verification steps:
 
 ```sh
 pkg install root-repo
@@ -246,9 +252,9 @@ They are used for:
 - `procps` — `pgrep` and `pkill`;
 - `nano` — editing the configuration and service files used in this guide.
 
-There is no need to install `clang` separately: the Termux `golang` package already depends on it, and cgo uses it as the C compiler.
+You do not need to install `clang` separately. The Termux `golang` package already depends on it. Cgo uses it as the C compiler.
 
-Some verification steps later in the guide use additional tools. They are not required for Yggdrasil itself. Install them if you want to reproduce those tests:
+The later verification steps use extra tools. Yggdrasil itself does not need them. Install them to repeat those tests:
 
 ```sh
 pkg install curl openssh tcpdump
@@ -261,7 +267,7 @@ They are used only for verification:
 - `openssh` — temporary inbound SSH target for the firewall test;
 - `tcpdump` — observing packets on `ygg0` during the firewall test.
 
-Run the commands above inside Termux as its normal user; the later `su -c` commands acquire root only for system networking operations. Android already supplies `su` (through your root solution) and `/system/bin/ip6tables`; `sudo` or `tsu` is not required by this guide.
+Run the commands above as the normal Termux user. The later `su -c` commands use root for system networking. Your Android root solution supplies `su`. Android supplies `/system/bin/ip6tables`. You do not need `sudo` or `tsu`.
 
 Check the Go environment:
 
@@ -277,21 +283,19 @@ arm64
 1
 ```
 
-The compiler name may vary with the Termux toolchain. If `LD_PRELOAD` interferes with Go, run the affected command as `env -u LD_PRELOAD go ...`; for the build wrapper use `env -u LD_PRELOAD PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"`. This is a conditional workaround, not a requirement to change the shell environment globally.
+The compiler name may vary with the Termux toolchain. If `LD_PRELOAD` interferes with Go, use `env -u LD_PRELOAD go ...` for the affected command. For the build wrapper, use `env -u LD_PRELOAD PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"`. Use this workaround only when needed. You do not need to change the shell environment globally.
 
-The important point is that this guide builds Yggdrasil as an **Android** binary with **cgo enabled**, not as a generic Linux/arm64 binary.
+Build an **Android** binary with **cgo enabled**. A generic Linux/arm64 binary is not suitable for this guide.
 
 ---
 
 ## 5. Build Yggdrasil natively for Android
 
-This guide is pinned to the tested upstream release; the [verification matrix](#evidence-and-limits) distinguishes service revisions and scenarios:
+This guide uses a fixed, tested upstream release. The [verification matrix](#evidence-and-limits) lists the service revisions and scenarios:
 
 ```text
 v0.5.14
 ```
-
-Clone it:
 
 First obtain this guide's patch:
 
@@ -324,29 +328,29 @@ git apply ~/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch
 PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 ```
 
-Use a fresh source checkout; do not apply the same patch twice. The resulting daemon version should be `0.5.14-direct.3`.
+Use fresh source and apply the patch only once. The daemon version should be `0.5.14-direct.3`.
 
 These commands perform three separate steps:
 
-1. `git apply --check` verifies that the patch fits the checked-out source. It changes no files and does not prove that a future release behaves correctly with the patch.
-2. `git apply` changes the source files described by the patch. It does not rebuild or change the installed daemon.
-3. `./build` compiles the modified source into `yggdrasil` and `yggdrasilctl` in the current directory. Installation happens later in this guide.
+1. `git apply --check` checks whether the patch fits the source. It changes no files. It does not prove that the patch works correctly on a future release.
+2. `git apply` changes the source files listed in the patch. It does not rebuild or change the installed daemon.
+3. `./build` builds `yggdrasil` and `yggdrasilctl` in the current directory. You install them later.
 
-In the build command, `PKGVER=0.5.14-direct.3` sets the displayed build version; the suffix does not enable VPN bypass. `-p` selects `-buildmode=pie` for Android, and `-l` passes the following string to the Go linker. See the upstream [v0.5.14 build script](https://github.com/yggdrasil-network/yggdrasil-go/blob/v0.5.14/build). The bypass comes from the source changes, not these build arguments.
+`PKGVER=0.5.14-direct.3` sets the displayed build version. The suffix does not enable VPN bypass. `-p` selects `-buildmode=pie` for Android. `-l` passes the next string to the Go linker. See the upstream [v0.5.14 build script](https://github.com/yggdrasil-network/yggdrasil-go/blob/v0.5.14/build). The source changes provide bypass.
 
-Run patching and building as the ordinary Termux user. The installed daemon runs as root through the service so it can set the socket mark. For an existing installation or a future release, use [section 19](#19-updating-yggdrasil) rather than repeating fresh-install commands or generating a new private key.
+Patch and build as the normal Termux user. The service runs the installed daemon as root so it can set the socket mark. For an existing installation or a future release, follow [section 19](#19-updating-yggdrasil). Do not repeat new-install commands or generate a new private key.
 
 ### Why `-checklinkname=0`?
 
-With the tested Go toolchain, building Yggdrasil v0.5.14 without this linker option failed with an error similar to:
+With the tested Go toolchain, building Yggdrasil v0.5.14 without this linker option failed. The error was similar to:
 
 ```text
 invalid reference to net.zoneCache
 ```
 
-The dependency involved uses `go:linkname`, whose checks were tightened in newer Go versions. The `-checklinkname=0` linker flag allows this version to build with the tested modern Go toolchain.
+The dependency uses `go:linkname`. Newer Go versions apply stricter checks to it. The `-checklinkname=0` linker flag lets this version build with the tested Go toolchain.
 
-This is a version-specific build detail. When upgrading Yggdrasil later, re-check whether the flag is still required.
+This build detail is specific to the version. When upgrading, check whether the flag is still needed.
 
 ### 5.1 Verify the binaries
 
@@ -378,9 +382,17 @@ Do not continue if you accidentally built `GOOS=linux` when following this guide
 
 ### 5.2 What the patch changes
 
-The [patch](../patches/android-peer-vpn-bypass.patch) is a unified diff against v0.5.14. `diff --git` names each changed file; `@@` marks a changed region. Lines starting with `-` are removed, lines starting with `+` are added, and unchanged context lets Git find the right location. It modifies three source files, with 56 added lines and 7 removed lines.
+The [patch](../patches/android-peer-vpn-bypass.patch) is a unified diff against v0.5.14. Read it as follows:
 
-**`src/core/link_tcp.go` — run socket control on Android.** Upstream selected `getControl` when a peer was bound to a named interface. The patch also selects it for Android with ordinary `Peers`, even when no interface is specified:
+- `diff --git` names each changed file.
+- `@@` marks a changed region.
+- Lines starting with `-` are removed.
+- Lines starting with `+` are added.
+- Unchanged context helps Git find the location.
+
+The patch changes three source files: 56 added lines and 7 removed lines.
+
+**`src/core/link_tcp.go` — run socket control on Android.** Upstream selected `getControl` only for peers bound to a named interface. The patch also selects it for Android with ordinary `Peers`. No interface needs to be specified:
 
 ```go
 if sintf != "" || runtime.GOOS == "android" {
@@ -388,33 +400,39 @@ if sintf != "" || runtime.GOOS == "android" {
 }
 ```
 
-The separate interface-selection code still runs only when `sintf` is nonempty. The default configuration does not pin `wlan0` or a mobile interface: Android chooses the physical network for a new connection. TCP, TLS, WS, WSS, SOCKS and SOCKS+TLS share this TCP dialer.
+The separate interface-selection code still runs only when `sintf` is nonempty. The default configuration does not fix `wlan0` or a mobile interface. Android chooses the physical network for each new connection. TCP, TLS, WS, WSS, SOCKS and SOCKS+TLS share this TCP dialer.
 
-**`src/core/link_tcp_linux.go` — mark the socket before connection.** The callback obtains the socket descriptor through `syscall.RawConn.Control` and, on Android, executes:
+**`src/core/link_tcp_linux.go` — mark the socket before connection.** The callback gets the socket descriptor through `syscall.RawConn.Control`. On Android, it runs:
 
 ```go
 unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, 1<<17)
 ```
 
-`1<<17` equals `0x20000`, the `protectedFromVpn` bit in Android's [Fwmark.h](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/include/Fwmark.h). This is local socket-routing metadata; it is not sent to the peer as a packet field. On the tested rooted phone, Android routes these sockets outside the VPN. If a named interface is explicitly requested, `BindToDevice` is still applied after marking. Errors from descriptor access, marking or interface binding are returned to the dialer, so a failed setup does not silently continue through the VPN.
+`1<<17` equals `0x20000`, the `protectedFromVpn` bit in Android's [Fwmark.h](https://android.googlesource.com/platform/system/netd/+/refs/heads/main/include/Fwmark.h). This is local socket-routing metadata. It is not a packet field sent to the peer.
 
-The filename ends in `_linux.go` because Android also uses Go's Linux platform files; `runtime.GOOS == "android"` restricts the new mark to Android. Building a generic Linux binary would skip that Android branch.
+On the tested rooted phone, Android routes these sockets outside the VPN. If you request a named interface, `BindToDevice` still runs after marking. The dialer receives any descriptor, marking or binding error. Failed setup stops the connection instead of silently using the VPN.
 
-**`src/core/link_quic.go` — give QUIC a marked UDP socket.** Upstream's `quic.DialAddr` creates its own UDP socket. On Android the patch instead creates one through `net.ListenConfig`, with the same socket-control callback:
+The filename ends in `_linux.go` because Android also uses Go's Linux platform files. `runtime.GOOS == "android"` limits the new mark to Android. A generic Linux binary would skip that branch.
+
+**`src/core/link_quic.go` — give QUIC a marked UDP socket.** Upstream's `quic.DialAddr` creates its own UDP socket. On Android, the patch creates one through `net.ListenConfig` with the same socket-control callback:
 
 ```go
 lc := net.ListenConfig{Control: l.tcp.getControl(info.sintf)}
 ```
 
-It chooses UDP/IPv4 or UDP/IPv6 for the resolved destination, calls `ListenPacket`, then passes the resulting socket to `quic.Dial`. The mark is therefore set before the first QUIC handshake packet. The outgoing stream wrapper stores the owned `packetConn`; failed connection attempts, failed stream creation and stream closure close it. Non-Android QUIC dialing keeps the original `DialAddr` path.
+The patch chooses UDP/IPv4 or UDP/IPv6 for the resolved destination. It calls `ListenPacket`, then passes the socket to `quic.Dial`. The mark is set before the first QUIC handshake packet.
 
-These changes protect outgoing peer transport sockets only. They add no service, polling loop, routing rule or firewall rule. `unix://` is local IPC and needs no IP-routing change. DNS resolution may still use the VPN; for SOCKS the marked connection reaches the proxy, whose onward route is controlled by that proxy. This patch does not change QUIC incoming listeners. See [section 10.4](#104-direct-peer-transport) for coverage and [DIRECT-TRANSPORT](../DIRECT-TRANSPORT.md#all-outgoing-peer-transports-in-direct3) for the actual tests and their limits.
+The outgoing stream wrapper stores the owned `packetConn`. Failed connections, failed stream creation and stream closure close that socket. Non-Android QUIC dialing keeps the original `DialAddr` path.
+
+These changes protect only outgoing peer transport sockets. They add no service, polling loop, routing rule or firewall rule. `unix://` is local IPC and needs no IP-routing change. DNS may still use the VPN. For SOCKS, the marked connection reaches the proxy. The proxy controls the route from there. The patch does not change incoming QUIC listeners.
+
+See [section 10.4](#104-direct-peer-transport) for coverage and [DIRECT-TRANSPORT](../DIRECT-TRANSPORT.md#all-outgoing-peer-transports-in-direct3) for tests and limits.
 
 ---
 
 ## 6. Create the Yggdrasil configuration
 
-For a new node, generate a fresh configuration. To reinstall an existing node, first back up its binaries, configuration and service/boot scripts, then copy its existing configuration instead of generating a new identity:
+Generate a configuration for a new node only. To reinstall an existing node, first back up its binaries, configuration and service/boot scripts. Then copy its existing configuration to keep the identity:
 
 ```sh
 cp -p "$PREFIX/etc/yggdrasil.conf" ~/yggdrasil.conf
@@ -452,9 +470,9 @@ Current public peers are published here:
 
 https://github.com/yggdrasil-network/public-peers
 
-For normal usage, the official public-peers repository recommends **2 or 3 peers**. Prefer peers that are geographically close to you to keep latency down. Using a small set of stable peers also gives redundancy without creating unnecessary distant peerings.
+The official public-peers repository recommends **2 or 3 peers** for normal use. Choose nearby peers to reduce latency. A small set of stable peers gives redundancy without unnecessary distant connections.
 
-The default example uses TCP IPv4 literals in ordinary `Peers`. TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC are all supported by the socket patch; see section 10.4. The following addresses were used for the tests; check current availability before choosing them:
+The default example uses TCP IPv4 addresses in ordinary `Peers`. The socket patch supports TCP, TLS, WS, WSS, SOCKS, SOCKS+TLS and QUIC. See section 10.4. The tests used the addresses below. Check their current availability before choosing them:
 
 ```text
 Peers: [
@@ -474,15 +492,25 @@ MulticastInterfaces: [
 ]
 ```
 
-Peer availability changes over time. Choose current nearby peers using a supported transport from the public-peers repository. IPv4 literals avoid peer DNS lookups through the VPN. Public peers are not bound to a fixed interface, and Android selects the physical network.
+Choose current nearby peers from the public-peers repository. IPv4 addresses avoid peer DNS lookups through the VPN. Public peers have no fixed interface. Android selects the physical network.
 
 #### Wi-Fi multicast discovery
 
-`MulticastInterfaces` enables Yggdrasil's built-in discovery on Wi-Fi interfaces named `wlanN`. `Beacon: true` advertises this node; `Listen: true` discovers other nodes on the same LAN and connects to them. Discovery uses IPv6 link-local multicast (`ff02::114`, UDP port 9001); the resulting peer connection uses TLS over TCP. `Port: 0` chooses the local TCP port automatically. Keep the regular `Listen: []`: multicast creates its own link-local listener without a general incoming listener.
+`MulticastInterfaces` enables built-in discovery on Wi-Fi interfaces named `wlanN`.
 
-The Wi-Fi regex limits local discovery; it does not pin the public peers to Wi-Fi. They still use Android's default physical network and remain available over mobile data. No helper service or additional firewall rules are needed. The existing firewall continues to protect traffic arriving through `ygg0`.
+- `Beacon: true` advertises this node.
+- `Listen: true` discovers other nodes on the LAN and connects to them.
+- Discovery uses IPv6 link-local multicast (`ff02::114`, UDP port 9001).
+- Peer connections use TLS over TCP.
+- `Port: 0` chooses the local TCP port automatically.
 
-On a router running Yggdrasil with compatible LAN multicast enabled, the phone can become a direct LAN peer. The [OpenWrt status module](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/blob/main/source/yggdrasil-status/README.md#behavior) then learns its native `node` address from the router's peer table and maps it to the phone's MAC. Merely connecting to the router's Wi-Fi is insufficient for that field: a local peer connection is required. Wi-Fi client isolation or blocked multicast can prevent discovery. To disable local discovery while retaining public peers, set `MulticastInterfaces: []` and restart Yggdrasil.
+Keep the regular `Listen: []`. Multicast creates its own link-local listener without a general incoming listener.
+
+The Wi-Fi regex limits local discovery only. Public peers still use Android's default physical network, including mobile data. No helper service or extra firewall rules are needed. The existing firewall still protects traffic arriving through `ygg0`.
+
+If a router runs Yggdrasil with compatible LAN multicast, the phone can become its direct LAN peer. The [OpenWrt status module](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/blob/main/source/yggdrasil-status/README.md#behavior) then reads the phone's native `node` address from the router's peer table and maps it to the phone's MAC. A local peer connection is required for this field. Connecting to Wi-Fi alone is not enough.
+
+Wi-Fi client isolation or blocked multicast can prevent discovery. To disable local discovery but keep public peers, set `MulticastInterfaces: []` and restart Yggdrasil.
 
 ### 6.2 Fix the interface name
 
@@ -498,7 +526,7 @@ and set:
 IfName: ygg0
 ```
 
-A deterministic interface name is important because the routing and firewall rules in this guide explicitly match `ygg0`.
+The routing and firewall rules match `ygg0`, so the interface name must stay fixed.
 
 ### 6.3 Use a UNIX admin socket
 
@@ -508,7 +536,7 @@ Set:
 AdminListen: unix:///data/data/com.termux/files/usr/tmp/yggdrasil.sock
 ```
 
-`AdminListen` may be absent from the generated configuration. If you do not see it, add it manually as a **top-level field inside the outer `{ ... }` configuration object**, for example before the final closing brace:
+The generated configuration may lack `AdminListen`. If so, add it as a **top-level field inside the outer `{ ... }` configuration object**. For example, place it before the final closing brace:
 
 ```text
 {
@@ -519,7 +547,7 @@ AdminListen: unix:///data/data/com.termux/files/usr/tmp/yggdrasil.sock
 
 This keeps the control API off a TCP listener.
 
-Because Yggdrasil will run as root, the resulting UNIX socket will normally also be root-owned. `yggdrasilctl` therefore needs root in this setup.
+Yggdrasil runs as root, so its UNIX socket is normally root-owned. Use root for `yggdrasilctl` too.
 
 ### 6.4 Check the generated Yggdrasil address
 
@@ -531,7 +559,7 @@ Run:
 
 It should return an address from Yggdrasil's `200::/7` range.
 
-The configuration contains the node's cryptographic identity. Keep this file if you want to keep the same Yggdrasil address.
+The configuration contains the node's cryptographic identity. Keep it to retain the same Yggdrasil address.
 
 ### 6.5 Validate the configuration
 
@@ -547,7 +575,7 @@ Expected:
 CONFIG_OK
 ```
 
-This command is used here as a parser/compatibility check. It does not overwrite the configuration.
+This command checks parsing and compatibility. It does not overwrite the configuration.
 
 ---
 
@@ -628,7 +656,7 @@ Create the service directory:
 mkdir -p "$PREFIX/var/service/yggdrasil"
 ```
 
-Prevent an already-running `runsvdir` from starting the service before both scripts are ready:
+Prevent an existing `runsvdir` from starting the service before both scripts are ready:
 
 ```sh
 touch "$PREFIX/var/service/yggdrasil/down"
@@ -644,7 +672,7 @@ nano "$PREFIX/var/service/yggdrasil/run"
 
 Contents:
 
-The complete 276-line v3 `run` is organized into five sections: previous session, routing/firewall, Yggdrasil, helper ULAs and network events. Copy the whole script, including the final `YGG_ROOT` line and `wait` command. [Compatibility details](#103-android-vpn--webrtcvoip-compatibility).
+The v3 `run` has 276 lines in five sections: previous session, routing/firewall, Yggdrasil, helper ULAs and network events. Copy the whole script, including the final `YGG_ROOT` line and `wait` command. [Compatibility details](#103-android-vpn--webrtcvoip-compatibility).
 
 ```sh
 #!/data/data/com.termux/files/usr/bin/sh
@@ -950,7 +978,7 @@ su -c 'ip -6 ru del to 200::/7 lookup 200 prio 1000 2>/dev/null || true'
 exit 0
 ```
 
-The `[y]ggdrasil` expression is intentional. It prevents `pkill -f` from matching the shell command that is executing `pkill` itself.
+The `[y]ggdrasil` pattern prevents `pkill -f` from matching the shell command that runs `pkill` itself.
 
 Make both scripts executable:
 
@@ -958,7 +986,7 @@ Make both scripts executable:
 chmod +x "$PREFIX/var/service/yggdrasil/run" "$PREFIX/var/service/yggdrasil/finish"
 ```
 
-Create the logger and boot integration before enabling the service. The firewall is already in `run` and is applied before Yggdrasil starts.
+Create the logger and boot script before enabling the service. `run` already applies the firewall before starting Yggdrasil.
 
 ### 9.3 Service logs
 
@@ -970,7 +998,7 @@ chmod 700 "$PREFIX/var/log/sv/yggdrasil"
 nano "$PREFIX/var/service/yggdrasil/log/run"
 ```
 
-Contents of `log/run` (the standard Termux services logger; `LOGDIR` is supplied by `termux-services`):
+Contents of `log/run`, the standard Termux services logger. `termux-services` supplies `LOGDIR`:
 
 ```sh
 #!/data/data/com.termux/files/usr/bin/sh
@@ -1003,34 +1031,51 @@ Make the logger executable:
 chmod +x "$PREFIX/var/service/yggdrasil/log/run"
 ```
 
-`s262144` rotates at 262,144 bytes (256 KiB); `n4` retains four rotated files **plus** `current`, approximately 1.25 MiB of log data in normal operation. These are rotation thresholds, not a strict disk quota. See the [svlogd manual](https://smarden.org/runit/svlogd.8).
+`s262144` rotates logs at 262,144 bytes (256 KiB). `n4` keeps four rotated files **plus** `current`. Normal log data totals about 1.25 MiB. These settings control rotation, not a strict disk quota. See the [svlogd manual](https://smarden.org/runit/svlogd.8).
 
-Yggdrasil stdout/stderr and the helper's `[ULA] Primary uplink`, `Added`, `Removed`, `Setup failed` and `Too many changes` messages go to the same timestamped log:
+One timestamped log receives Yggdrasil stdout/stderr and these helper messages: `[ULA] Primary uplink`, `Added`, `Removed`, `Setup failed` and `Too many changes`:
 
 ```sh
 tail -n 100 "$PREFIX/var/log/sv/yggdrasil/current"
 tail -F "$PREFIX/var/log/sv/yggdrasil/current"
 ```
 
-Stop following with Ctrl-C. Logs contain network/node addresses; redact them before sharing. An old `current` file alone does not prove the logger is running: check `sv status "$PREFIX/var/service/yggdrasil/log"` and fresh timestamps.
+Stop following with Ctrl-C. Logs contain network/node addresses. Redact them before sharing. An old `current` file does not prove the logger is running. Check `sv status "$PREFIX/var/service/yggdrasil/log"` and fresh timestamps.
 
-`run` creates `/dev/net/tun` as a symlink to `/dev/tun` only when the path is absent; it preserves an existing path.
+`run` creates `/dev/net/tun` as a symlink to `/dev/tun` only if the path is missing. It keeps an existing path.
 
 ### 9.4 Previous-session takeover
 
-The persistent root Bash session writes its PID and Linux process start time to `$PREFIX/var/run/yggdrasil-root`. A later run checks both values before sending TERM to that previous session; a reused PID is not treated as its owner. It waits for cleanup for up to ten seconds **before** changing routing, firewall or `ygg0`. If the old session is still alive, startup exits with an error and the enabled runit service retries.
+The root Bash session writes its PID and Linux process start time to `$PREFIX/var/run/yggdrasil-root`. A later run checks both values before sending TERM to the old session. This avoids treating a reused PID as the previous owner.
 
-The root session stops and reaps its Yggdrasil, monitor and worker children; the worker releases owned ULAs. This covers a previous session surviving the loss of its Termux supervisor. `finish` is unchanged: it stops the daemon by configuration path and removes the interface/rule. Use runit for lifecycle operations; do not launch concurrent copies of `run` manually. The state file is a takeover record, not an atomic lock for arbitrary simultaneous launches.
+The new session waits up to ten seconds for cleanup **before** changing routing, firewall or `ygg0`. If the old session is still alive, startup exits with an error. The enabled runit service then retries.
 
-Killing only `runsvdir` leaves existing `runsv` processes able to supervise their services. Killing `runsv` as well removes that protection; SIGKILL cannot run `finish` or shell traps. On the tested rooted phone, the Magisk-spawned root session continued running. A subsequent Termux login or reboot restores the supervisor, and v3 then takes over in the ordered sequence above. Until that trigger, an orphaned Yggdrasil can keep working, but if it fails there is no runit restart. See [background restrictions](#31-optional-android-child-process-restrictions), [runsv](https://smarden.org/runit/runsv.8) and [runsvdir](https://smarden.org/runit/runsvdir.8).
+The root session stops and reaps its Yggdrasil, monitor and worker children. The worker removes ULAs it owns. This handles a session that survived the loss of its Termux supervisor.
+
+`finish` still stops the daemon by configuration path and removes the interface/rule. Use runit for service control. Do not launch concurrent copies of `run` manually. The state file records takeover data; it is not an atomic lock for simultaneous launches.
+
+Killing only `runsvdir` leaves existing `runsv` processes supervising their services. Killing `runsv` too removes that protection. SIGKILL cannot run `finish` or shell traps.
+
+On the tested phone, the root session started by Magisk kept running. A later Termux login or reboot restores the supervisor. v3 then takes over in the order above. Until then, an orphaned Yggdrasil can keep working, but runit cannot restart it if it fails. See [background restrictions](#31-optional-android-child-process-restrictions), [runsv](https://smarden.org/runit/runsv.8) and [runsvdir](https://smarden.org/runit/runsvdir.8).
 
 ### 9.5 Upgrading an existing service profile
 
-A binary-only update in [section 19](#19-updating-yggdrasil) preserves the service scripts; it does not install v3. To migrate from an older profile, back up `run`, `finish`, boot scripts and any logger/config before replacement. Keep the private Yggdrasil configuration/key and both patched binaries. When coming from an unpatched upstream profile, also build/install the patch and both binaries as described in sections 5 and 19. Check root access and a working supervisor before stopping anything.
+A binary-only update in [section 19](#19-updating-yggdrasil) keeps the service scripts. It does not install v3. To migrate an older profile:
 
-Stop the older service through its live supervisor and confirm the daemon/root worker have exited **before** replacing its script: pre-v2 sessions have no PID/start-time takeover record. Install the complete `run`/`finish` blocks above and the logger/config, make the scripts executable, retain `10-services.sh`, and optionally remove the obsolete firewall boot script. Check the outer shell with `sh -n` and the embedded `YGG_ROOT` Bash body separately with `bash -n`; checking only the outer heredoc does not validate its Bash contents.
+- Back up `run`, `finish`, boot scripts and any logger/config before replacing them.
+- Keep the private Yggdrasil configuration/key and both patched binaries.
+- If the old profile is unpatched upstream, also build and install the patch and both binaries as described in sections 5 and 19.
+- Check root access and a working supervisor before stopping anything.
 
-Resume only if the service was meant to run; preserve its prior disabled/down state otherwise. This is a manual migration with saved rollback files, not an automatic transactional installer. Use the [compatibility checks](#verify-the-installed-service), [logs](#93-service-logs) and [verification matrix](#evidence-and-limits); structural installation success alone does not prove calls or boot autostart.
+Stop the old service through its live supervisor. Confirm that the daemon and root worker have exited **before** replacing the script. Sessions from before v2 have no PID/start-time takeover record.
+
+Install the complete `run`/`finish` blocks above and the logger/config. Make the scripts executable. Keep `10-services.sh`. You may remove the obsolete firewall boot script.
+
+Check the outer shell with `sh -n`. Check the embedded `YGG_ROOT` Bash body separately with `bash -n`. Checking the outer heredoc alone does not validate the Bash body.
+
+Resume the service only if it was meant to run. Otherwise, keep its prior disabled/down state. This is a manual migration with saved rollback files. It does not roll back automatically.
+
+Use the [compatibility checks](#verify-the-installed-service), [logs](#93-service-logs) and [verification matrix](#evidence-and-limits). Successful installation alone does not prove calls or boot startup.
 
 ---
 
@@ -1044,7 +1089,7 @@ Yggdrasil uses:
 
 for its IPv6 address space.
 
-We do not want to replace Android's default IPv6 route. We only want traffic whose **destination** is inside Yggdrasil to use the Yggdrasil interface.
+Keep Android's default IPv6 route. Only traffic with a **destination** inside Yggdrasil should use the Yggdrasil interface.
 
 The service therefore creates:
 
@@ -1071,9 +1116,9 @@ destination is 200::/7?
 
 ### 10.1 Why priority 1000?
 
-Android has its own policy-routing rules. A low numeric priority causes the Yggdrasil destination rule to be evaluated early without replacing Android's normal routing setup.
+Android has its own policy-routing rules. A low number gives the Yggdrasil destination rule an early check. It does not replace Android's routing setup.
 
-Before adding rule `1000`, `run` removes duplicate copies of that exact `to 200::/7 lookup 200 prio 1000` rule. Failure to add the required rule aborts startup rather than being hidden. Android's other RPDB rules are preserved.
+Before adding rule `1000`, `run` removes duplicates of the exact `to 200::/7 lookup 200 prio 1000` rule. If adding it fails, startup stops. Android's other RPDB rules stay unchanged.
 
 ### 10.2 Why there is no priority 999 source rule
 
@@ -1090,7 +1135,7 @@ This guide intentionally uses **only**:
 to 200::/7 lookup 200 priority 1000
 ```
 
-On the tested setup, the source rule was proven unnecessary.
+The tested setup did not need the source rule.
 
 With only rule `1000`, a route lookup returned:
 
@@ -1102,7 +1147,7 @@ src <YGG_IP>
 
 Outbound TCP worked normally.
 
-A separate inbound SSH test also confirmed that reply traffic from the phone's Yggdrasil address used the correct route without rule `999`.
+A separate inbound SSH test confirmed correct reply routing from the phone's Yggdrasil address without rule `999`.
 
 So the final tested configuration is:
 
@@ -1114,11 +1159,11 @@ with no `999` rule.
 
 ### 10.3 Android VPN + WebRTC/VoIP compatibility
 
-This branch uses one event-driven handler for two tested IPv4-only cases: an Android VPN and the phone's physical Internet network. The peer socket patch and the application's IPv6 compatibility are separate layers. Yggdrasil itself can transport its IPv6 overlay over IPv4 peers.
+This branch uses one event-driven handler for two tested IPv4-only cases: an Android VPN and the phone's physical Internet network. The peer socket patch handles transport. The ULA handler handles IPv6 compatibility for applications. Yggdrasil itself can carry its IPv6 overlay over IPv4 peers.
 
-In a failed call, XMPP and Yggdrasil remained reachable, but WebRTC sent only an IPv4 host candidate. It emitted no IPv6 STUN traffic toward the Yggdrasil server. Rule `1000` cannot route packets that the application has not created.
+In a failed call, XMPP and Yggdrasil were still reachable. WebRTC sent only an IPv4 host candidate. It sent no IPv6 STUN traffic toward the Yggdrasil server. Rule `1000` cannot route packets that the application has not created.
 
-An additional non-link-local IPv6 address on the relevant Internet/VPN interface enabled IPv6 ICE candidates in the successful tests. Putting that address only on `ygg0` or an unrelated dummy interface did not resolve the earlier VPN case. This is an Android/WebRTC compatibility workaround, not general IPv6 Internet service.
+In successful tests, adding a non-link-local IPv6 address to the relevant Internet/VPN interface enabled IPv6 ICE candidates. Adding it only to `ygg0` or an unrelated dummy interface did not fix the earlier VPN case. This workaround enables Android/WebRTC compatibility. It does not provide general IPv6 Internet access.
 
 #### Addresses and interface selection
 
@@ -1129,7 +1174,9 @@ An additional non-link-local IPv6 address on the relevant Internet/VPN interface
 | Non-primary physical interfaces | Left unchanged; this excluded IMS and hotspot downstream on the tested phone |
 | An interface with another global-scope IPv6 address | Existing IPv6 preserved; the handler's own ULA removed if it owns one |
 
-Linux `scope global` includes ULA and does not imply public Internet reachability. Link-local `fe80::` alone does not satisfy the IPv6 condition. Both helpers retain the native node address's low 112 bits and use different first groups, so they are distinct between network types and derived from the key between phones. Do not clone one private key onto multiple phones. A synthetic example:
+Linux `scope global` includes ULA. It does not mean public Internet access. Link-local `fe80::` alone does not satisfy the IPv6 condition.
+
+Both helpers keep the native node address's low 112 bits. Their first groups differ, so VPN and physical helpers have different addresses. The key determines the remaining bits for each phone. Do not copy one private key onto multiple phones. A synthetic example:
 
 ```text
 Yggdrasil: 202:1234:5678:9abc:def0:1234:5678:9abc
@@ -1137,13 +1184,21 @@ Physical:  fd42:1234:5678:9abc:def0:1234:5678:9abc/128
 VPN:       fd43:1234:5678:9abc:def0:1234:5678:9abc/128
 ```
 
-The VPN helper replaces the earlier fixed `fd42::1/128`. Do not use one shared constant on a physical Wi-Fi LAN: duplicate unicast addresses can fail [IPv6 duplicate-address detection](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4).
+The VPN helper replaces the old fixed `fd42::1/128`. Do not share one constant address on a physical Wi-Fi LAN. Duplicate unicast addresses can fail [IPv6 duplicate-address detection](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4).
 
-A controlled A/B on 2026-10-14 kept the IPv4-only APN and Amnezia VPN unchanged and restarted the messengers before the decisive uniform-address trial. With one node-derived ULA on VPN and physical interfaces, WebRTC gathered **zero IPv6 candidates** and ICE reached FAILED. With different addresses it reached CONNECTED with working audio. The control used the earlier fixed VPN helper; v3 subsequently passed with the node-derived `fd43:` helper. Keep the two-address policy. The proposed ambiguous IP-to-network mapping inside Android/WebRTC is a **hypothesis**, not a proven mechanism or a universal result for all ROMs.
+A controlled A/B test on 2026-10-14 kept the IPv4-only APN and Amnezia VPN unchanged. The messengers were restarted before the decisive test with identical addresses.
+
+- With one node-derived ULA on both VPN and physical interfaces, WebRTC gathered **zero IPv6 candidates**. ICE reached FAILED.
+- With different addresses, ICE reached CONNECTED and audio worked. This control used the earlier fixed VPN helper.
+- v3 then passed with the node-derived `fd43:` helper.
+
+Keep the two-address policy. Ambiguous IP-to-network mapping inside Android/WebRTC is a proposed explanation. It remains a **hypothesis**, not a proven mechanism or a result for all ROMs.
 
 #### What the handler changes
 
-The worker records interface index and original `disable_ipv6`, enables IPv6 only when required, and adds its own /128 with `nodad`. These key-derived addresses skip duplicate-address detection. It adds no Internet default route and does not change the native Yggdrasil identity. Calls still use the overlay address through rule `1000`, table `200`, `ygg0`.
+The worker records the interface index and original `disable_ipv6` value. It enables IPv6 only when needed and adds its own /128 with `nodad`. These addresses come from the key and skip duplicate-address detection.
+
+The handler adds no Internet default route and does not change the native Yggdrasil identity. Calls still use the overlay address through rule `1000`, table `200` and `ygg0`.
 
 The primary physical uplink is the `dev` returned by:
 
@@ -1151,7 +1206,7 @@ The primary physical uplink is the `dev` returned by:
 ip -4 route get 1.1.1.1 mark 0x20000
 ```
 
-This kernel lookup sends no packet and performs no DNS query. It uses the protected-from-VPN mark of peer sockets. Only the returned eligible physical interface is considered; there is no semantic IMS/hotspot blacklist. Other naming conventions or ROM routing policies need their own checks.
+This kernel lookup sends no packet and makes no DNS query. It uses the protected-from-VPN mark of peer sockets. The handler considers only the eligible physical interface returned by the lookup. It does not classify IMS/hotspot networks. Other interface names or ROM routing policies need separate checks.
 
 #### Events and cleanup
 
@@ -1161,15 +1216,30 @@ The root session subscribes before the initial snapshot:
 ip -o monitor label link address route rule
 ```
 
-It confirms subscription by matching the monitor's socket inode in `/proc/PID/fd` to a subscribed entry in `/proc/net/netlink`, rather than assuming the Netlink port ID equals the process PID. After a blocking read, `read -t 0` checks for already queued lines. Each batch deduplicates named link/address interfaces and performs at most one primary-uplink refresh for route/rule events. A changed primary also checks the old and new uplinks. There is no periodic timer or extra network-switching daemon.
+The session confirms the subscription through the monitor's socket inode. It matches the inode in `/proc/PID/fd` to a subscribed entry in `/proc/net/netlink`. It does not assume the Netlink port ID equals the process PID.
 
-Replaying a roughly 15-minute event recording reduced primary route lookups from **860 to 52**. This is an offline replay result, not a live syscall count or a measured battery saving. Event handling still forks `ip` for address checks and route lookups; netd policy-rule churn can cause work even when the uplink does not change.
+After a blocking read, `read -t 0` checks for queued lines. Each batch checks each named link/address interface once. Route/rule events trigger at most one primary-uplink refresh per batch. If the primary changes, the handler checks both old and new uplinks. It adds no periodic timer or extra switching daemon.
 
-Deletion of an owned ULA triggers restoration. Link down, loss of IPv4, uplink change, another global-scope IPv6 address and orderly shutdown release owned addresses. The saved IPv6 switch is restored only on the same interface index and only if that would not disable another global-scope IPv6 address. A pre-existing address is not claimed or deleted.
+Replaying about 15 minutes of recorded events reduced primary route lookups from **860 to 52**. This was an offline replay. It did not count live syscalls or measure battery savings.
 
-At most **four additions per interface in ten seconds** are attempted. Failed additions also consume this limit; there is no separate permanent failure flag. Link down clears the limit, and interface recreation starts a new window. After exhaustion the handler waits for a later network event; expiry of ten seconds alone does not wake it. `[ULA] Too many changes` is logged once per exhausted window.
+The handler still forks `ip` for address checks and route lookups. Repeated netd policy-rule changes can cause work even when the uplink stays the same.
 
-One persistent root Bash session owns the daemon, monitor and worker. `wait -n` notices child exit, cleanup stops/reaps the rest, and a live runit supervisor restarts the enabled service. Startup waits are bounded; steady-state handling has no polling loop or recurring `dumpsys`. The handler acquires no wake lock; the **boot script's persistent Termux wake lock** is a separate power policy. [Logging](#93-service-logs) · [Supervisor loss and takeover](#94-previous-session-takeover).
+Deleting an owned ULA triggers restoration. The handler releases owned addresses on:
+
+- Link down or loss of IPv4.
+- A primary-uplink change.
+- Arrival of another global-scope IPv6 address.
+- Orderly shutdown.
+
+It restores the saved IPv6 switch only on the same interface index. It also checks that restoration would not disable another global-scope IPv6 address. It neither claims nor deletes a pre-existing address.
+
+The handler attempts at most **four additions per interface in ten seconds**. Failed additions count too. There is no separate permanent failure flag. Link down clears the limit. Interface recreation starts a new window.
+
+After reaching the limit, the handler waits for a later network event. Ten seconds passing does not wake it. It logs `[ULA] Too many changes` once per exhausted window.
+
+One persistent root Bash session owns the daemon, monitor and worker. `wait -n` detects a child exit. Cleanup stops and reaps the other children. A live runit supervisor restarts the enabled service.
+
+Startup waits have time limits. Normal event handling uses no polling loop or recurring `dumpsys`. The handler takes no wake lock. The **boot script's persistent Termux wake lock** is a separate power policy. [Logging](#93-service-logs) · [Supervisor loss and takeover](#94-previous-session-takeover).
 
 #### Verify the installed service
 
@@ -1187,7 +1257,7 @@ With an IPv4-only VPN connected, inspect its actual `tunN`:
 su -c 'ip -6 -o addr show dev tun0 scope global'
 ```
 
-Expect `fd43:<node low 112 bits>/128`, unless another global-scope IPv6 address is already present. For an IPv4-only physical Internet interface, inspect the `dev` returned by the marked route lookup and expect the node-derived ULA. A native dual-stack interface needs no added ULA.
+Expect `fd43:<node low 112 bits>/128` unless the VPN already has another global-scope IPv6 address. For IPv4-only physical Internet, inspect the `dev` from the marked route lookup. Expect the node-derived ULA there. A native dual-stack interface needs no added ULA.
 
 For the actual Yggdrasil server, verify `dev ygg0`, table `200` and the native source address:
 
@@ -1195,17 +1265,17 @@ For the actual Yggdrasil server, verify `dev ygg0`, table `200` and the native s
 su -c 'ip -6 route get <YGGDRASIL_SERVER_IPV6>'
 ```
 
-Then make a new call. A running service, an address in `ip addr` or connected peers alone do not prove that WebRTC gathered IPv6 candidates. During the call, check overlay UDP:
+Make a new call. A running service, an address in `ip addr` or connected peers alone do not prove WebRTC gathered IPv6 candidates. During the call, check overlay UDP:
 
 ```sh
 su -c 'tcpdump -ni ygg0 -tttt -vv udp'
 ```
 
-Repeat after a VPN reconnect and a Wi-Fi/mobile transition without restarting Yggdrasil. Test reboot separately using sections 15 and 16. Preserve the configuration/key when upgrading from an earlier branch.
+Repeat after a VPN reconnect and a Wi-Fi/mobile transition without restarting Yggdrasil. Test reboot separately with sections 15 and 16. Keep the configuration/key when upgrading from an earlier branch.
 
 #### Evidence and limits
 
-These are recorded results from one rooted LineageOS 23 / Android 16 phone with Yggdrasil 0.5.14-direct.3. v3 is the 276-line service script above; it changes service management, not the peer transport patch.
+These results come from one rooted LineageOS 23 / Android 16 phone running Yggdrasil 0.5.14-direct.3. v3 is the 276-line service script above. It changes service management, not the peer transport patch.
 
 | Scenario | Revision/date | Recorded result and limit |
 | --- | --- | --- |
@@ -1219,13 +1289,17 @@ These are recorded results from one rooted LineageOS 23 / Android 16 phone with 
 | Uniform ULA on physical + VPN | Controlled A/B, 2026-10-14 | Negative: zero local IPv6 candidates and ICE FAILED after fresh messenger starts; different-address control CONNECTED |
 | Offline state models and event replay | v3, 2026-10-14 | 33/33 models passed; 860 → 52 route lookups on the recorded trace |
 
-The previous 207-line handler also passed a roughly 95-second mobile/AmneziaWG call on 2026-10-13 with ICE connected in 0.443 s and sustained native Yggdrasil media. Earlier Wi-Fi, QUIC, long-call and reboot results in [DIRECT-TRANSPORT.md](../DIRECT-TRANSPORT.md) used older service profiles; they do not prove every combination was repeated on v3.
+The previous 207-line handler passed a roughly 95-second mobile/AmneziaWG call on 2026-10-13. ICE connected in 0.443 s. Sustained native Yggdrasil media was observed.
 
-Handover checks above used calls **after** each transition; continuous mid-call handover was not established. The handler does not restart ICE or migrate an active call's sockets. Kernel addresses alone do not prove Android `LinkProperties` or ICE candidates. Other ROMs, network names, VPNs and application versions require their own checks. The internal reason for uniform-address candidate suppression remains unproven; see the [WebRTC Android network monitor](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java).
+The earlier Wi-Fi, QUIC, long-call and reboot tests in [DIRECT-TRANSPORT.md](../DIRECT-TRANSPORT.md) used older service profiles. They do not prove that every combination was retested on v3.
+
+The handover checks used calls **after** each transition. Continuous mid-call handover was not established. The handler does not restart ICE or move an active call's sockets.
+
+Kernel addresses alone do not prove Android `LinkProperties` or ICE candidates. Check other ROMs, network names, VPNs and application versions separately. See the [WebRTC Android network monitor](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java). The A/B mechanism and its limits are described under Addresses and interface selection above.
 
 ### 10.4 Direct peer transport
 
-The patch in section 5 sets `SO_MARK=0x20000` on outgoing TCP-based and QUIC/UDP peer sockets on Android. Socket setup errors are returned instead of allowing an unprotected connection. Android's physical-network selection handles Wi-Fi and mobile data without a new supervisor, timer or interface selector. The existing runit scripts need no transport changes.
+The patch in section 5 sets `SO_MARK=0x20000` on outgoing TCP-based and QUIC/UDP peer sockets on Android. Socket setup errors stop the connection instead of allowing an unprotected connection. Android selects Wi-Fi or mobile data. No new supervisor, timer or interface selector is needed. The runit scripts need no transport changes.
 
 Verify the actual peer sockets with the VPN connected:
 
@@ -1234,13 +1308,19 @@ su -c "$PREFIX/bin/ss -tnep"
 su -c "$PREFIX/bin/ss -ulnep"
 ```
 
-Public outgoing Yggdrasil peer socket marks should include `0x20000`. TCP shows the physical source address; an unconnected QUIC UDP socket may show a wildcard source, so a bounded capture to that peer is needed to establish its actual interface. Applications that require the VPN should still use its address. A route lookup alone does not prove this socket path.
+Public outgoing Yggdrasil peer socket marks should include `0x20000`. TCP shows its physical source address. An unconnected QUIC UDP socket may show a wildcard source. Use a bounded capture to that peer to confirm its interface.
 
-The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
+Applications that need the VPN should still use its address. A route lookup alone does not prove the peer socket path.
 
-With the earlier `direct.2` build, Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from the previous `direct-vpn-bypass` profile and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](../DIRECT-TRANSPORT.md).
+The tested Conversations/WebRTC setup still needs the ULA inside an IPv4-only VPN. This is separate from sending peer traffic outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
 
-The `direct.3` build subsequently passed QUIC-only Wi-Fi/mobile handover and a full reboot. Calls with VLESS/Xray, including a Wi-Fi call lasting more than an hour, were reported successful; AmneziaWG was checked for XMPP connectivity on mobile data. The captures did not record call media, and a QUIC-only call with AmneziaWG was not separately confirmed. See [QUIC verification and its limits](../DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot). The temporary tests disabled TCP peers and multicast; normal peer and multicast settings were restored afterward.
+The earlier `direct.2` build passed Wi-Fi → mobile → Wi-Fi transitions without a Yggdrasil restart. Calls passed separately with Amnezia Premium XRay and AmneziaWG. Bidirectional media used `ygg0`. Peer TCP traffic used physical Wi-Fi. The other application kept its VPN connection.
+
+A clean reinstall of the previous `direct-vpn-bypass` profile and a full Android reboot also passed. An early Termux:Boot snapshot showed automatic startup, both marked peer sockets with physical source addresses, and the restored firewall. Later checks confirmed routing, overlay HTTP and automatic ULA restoration after VPN connection. See [transport verification and limits](../DIRECT-TRANSPORT.md).
+
+The `direct.3` build later passed QUIC-only Wi-Fi/mobile handover and a full reboot. The user reported successful VLESS/Xray calls, including a Wi-Fi call lasting more than an hour. AmneziaWG passed XMPP connectivity checks on mobile data.
+
+The captures did not record call media. A QUIC-only call with AmneziaWG was not separately confirmed. See [QUIC verification and its limits](../DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot). These temporary tests disabled TCP peers and multicast. Normal settings were restored afterward.
 
 
 The patch covers every outgoing peer scheme supported by Yggdrasil v0.5.14:
@@ -1256,23 +1336,27 @@ The patch covers every outgoing peer scheme supported by Yggdrasil v0.5.14:
 | `quic://` | Marked UDP socket created before the QUIC handshake |
 | `unix://` | Local IPC; no IP socket or VPN route |
 
-Only the daemon's outgoing transport sockets get this handling. It does not mark application UDP, all root/Termux traffic or future transports added upstream. UDP calls addressed to Yggdrasil already enter `ygg0` through rule `1000`; the peer transport carries those packets whether the peer uses TCP or QUIC.
+Only the daemon's outgoing transport sockets get this mark. The patch does not mark application UDP, all root/Termux traffic or future upstream transports. UDP calls to Yggdrasil already enter `ygg0` through rule `1000`. Peer transport carries these packets over TCP or QUIC.
 
-For QUIC, the daemon creates the UDP socket with the same Android socket control before passing it to quic-go. Socket-control failures abort the dial; failed handshakes and closed outgoing streams release the owned UDP socket. Non-Android QUIC dialing keeps upstream behavior.
+For QUIC, the daemon creates a UDP socket with the same Android socket control. It then passes the socket to quic-go. Socket-control failures stop the dial. Failed handshakes and closed outgoing streams release the owned UDP socket. Non-Android QUIC dialing keeps upstream behavior.
 
-Hostnames can still resolve through the VPN. SOCKS and environment HTTP proxies are intermediary services: the marked local connection does not control how the proxy itself reaches its destination. `unix://` is local and needs no bypass. The default guide keeps regular `Listen: []`; it does not expose public incoming listeners. Preserve the private key and admin socket.
+Hostnames can still resolve through the VPN. SOCKS and environment HTTP proxies are intermediate services. The marked local connection does not control the proxy's onward route. `unix://` is local and needs no bypass.
 
-The current `direct.3` build was checked separately with transport/socket tests and a real public QUIC peer with the VPN active. UDP traffic was observed only on physical Wi-Fi; the installed daemon kept its identity, configuration, multicast, routing, firewall and Codex's VPN path. QUIC handover and reboot were subsequently checked on `direct.3` as described above; coverage of the current service script is recorded in the [v3 matrix](#evidence-and-limits). [Detailed evidence and limits](../DIRECT-TRANSPORT.md).
+The guide keeps regular `Listen: []` and exposes no public incoming listeners. Preserve the private key and admin socket.
+
+The current `direct.3` build passed separate transport/socket tests and connected to a real public QUIC peer with the VPN active. UDP traffic appeared only on physical Wi-Fi. The installed daemon kept its identity, configuration, multicast, routing, firewall and Codex's VPN path.
+
+Later `direct.3` QUIC handover and reboot tests are described above. The [v3 matrix](#evidence-and-limits) records checks of the current service script. [Detailed evidence and limits](../DIRECT-TRANSPORT.md).
 
 ---
 
 ## 11. Firewall
 
-The public Yggdrasil network should be treated as an untrusted network.
+Treat the public Yggdrasil network as untrusted.
 
-Yggdrasil makes the host directly routable from other Yggdrasil nodes, including when the underlying Internet connection is behind NAT or CGNAT.
+Other Yggdrasil nodes can route directly to the host, even if its Internet connection is behind NAT or CGNAT.
 
-The official Yggdrasil FAQ recommends an IPv6 firewall for the Yggdrasil TUN interface. This guide uses the same stateful policy:
+The official Yggdrasil FAQ recommends an IPv6 firewall for the TUN interface. This guide uses that stateful policy:
 
 ```text
 ESTABLISHED,RELATED -> ACCEPT
@@ -1300,13 +1384,19 @@ iptables -F
 
 as part of this guide.
 
-Android owns additional firewall chains used by the OS, bandwidth accounting, networking and tethering.
+Android uses other firewall chains for the OS, bandwidth accounting, networking and tethering.
 
 ### 11.1 Applied by the service
 
-Section 2 of `run` applies the three INPUT rules **before** starting Yggdrasil, on boot, login-triggered startup and service restart. `-w` waits for the xtables lock; `-C || -A` avoids duplicates. If a required rule cannot be applied, startup exits. No separate firewall daemon or netd wait loop is added.
+Section 2 of `run` applies the three INPUT rules **before** Yggdrasil starts. This covers boot, starts from a login and service restarts.
 
-Users upgrading an older installation may delete `~/.termux/boot/05-ygg-firewall.sh`; v3 no longer needs it. Leaving the old script is harmless with these identical, idempotent rules. Only `10-services.sh` is needed for Termux:Boot.
+- `-w` waits for the xtables lock.
+- `-C || -A` avoids duplicate rules.
+- If applying a required rule fails, startup stops.
+
+No separate firewall daemon or netd wait loop is added.
+
+When upgrading an older installation, you may delete `~/.termux/boot/05-ygg-firewall.sh`. v3 needs only `10-services.sh` for Termux:Boot. Leaving the old firewall script is harmless: its identical rules do not create duplicates.
 
 After the first service start, check the effective INPUT order:
 
@@ -1322,11 +1412,11 @@ Expect one copy of each rule, in this order:
 -A INPUT -i ygg0 -j DROP
 ```
 
-`RELATED,ESTABLISHED` and `ESTABLISHED,RELATED` are equivalent sets. Android or another firewall can place earlier rules that change the effective policy; inspect the complete chain and use the [packet/counter tests](#15-verify-the-firewall). The service installs these rules on startup, not continuously after another application rewrites the firewall.
+`RELATED,ESTABLISHED` and `ESTABLISHED,RELATED` are equivalent sets. Android or another firewall may insert earlier rules that change the effective policy. Inspect the full chain and use the [packet/counter tests](#15-verify-the-firewall). The service installs rules at startup. It does not keep restoring them after another application rewrites the firewall.
 
 ### 11.2 AFWall+
 
-AFWall+'s main UI controls network access per application. Inbound protection for the `ygg0` interface can be repeated in a **shell-capable custom startup script** using the same commands as `run` (already executed as root):
+AFWall+'s main UI controls each application's network access. A **custom startup script that supports shell commands** can reapply inbound protection for `ygg0`. Use the same commands as `run`. The script already runs as root:
 
 ```sh
 # Allow replies to connections initiated by the phone and related traffic.
@@ -1340,7 +1430,9 @@ ip6tables -w -C INPUT -i ygg0 -j DROP 2>/dev/null ||
     ip6tables -w -A INPUT -i ygg0 -j DROP || exit 1
 ```
 
-The checks make reapplication idempotent. **Compatibility with AFWall+ was not tested on this phone.** Check the rule order after AFWall+ applies its policy. Custom-script handling depends on the AFWall+ version: versions that accept only individual iptables commands reject shell operators such as `||` and redirection, so this shell block cannot be pasted into that parser. Consult its [custom-script documentation](https://github.com/ukanth/afwall/wiki/CustomScripts) for the installed version.
+The checks prevent duplicate rules on reapplication. **Compatibility with AFWall+ was not tested on this phone.** Check rule order after AFWall+ applies its policy.
+
+Custom-script support depends on the AFWall+ version. Some versions accept only individual iptables commands. They reject shell operators such as `||` and redirection. Do not paste this shell block into that parser. Check the [custom-script documentation](https://github.com/ukanth/afwall/wiki/CustomScripts) for your installed version.
 
 ---
 
@@ -1354,7 +1446,7 @@ Termux:Boot executes files inside:
 
 in sorted filename order.
 
-This profile uses only `10-services.sh`, which acquires the Termux wake lock and starts the supervisor. Each service start applies its firewall in `run` before launching Yggdrasil.
+This profile needs only `10-services.sh`. It takes the Termux wake lock and starts the supervisor. `run` applies the firewall before each Yggdrasil start.
 
 ### 12.1 Create `10-services.sh`
 
@@ -1397,7 +1489,7 @@ Expected structure:
 
 ### 12.2 Why `10-services.sh` exists
 
-`runit` does not start itself merely because service directories exist.
+Creating service directories does not start `runit`.
 
 The directory:
 
@@ -1431,9 +1523,9 @@ Termux:Boot
                 └── runsv yggdrasil
 ```
 
-Termux:Boot could directly execute the Yggdrasil daemon, but then there would be no persistent supervisor, no normal `sv up/down/status` lifecycle and no automatic service restart behavior.
+Termux:Boot could start Yggdrasil directly. That would provide no persistent supervisor, normal `sv up/down/status` control or automatic service restart.
 
-Using both components is intentional:
+Each component has its own role:
 
 ```text
 Termux:Boot -> boot trigger
@@ -1442,27 +1534,33 @@ runit       -> service supervisor
 
 ### 12.3 Manual execution and shell startup
 
-Opening a Termux login shell can start the supervisor through `start-services.sh`; it does not scan `~/.termux/boot/`. In v3 the resulting service start still applies the firewall, because it lives in `run`. Login-triggered success does not prove Termux:Boot worked. [Reboot proof](#161-prove-startup-before-the-first-login).
+Opening a Termux login shell can start the supervisor through `start-services.sh`. It does not scan `~/.termux/boot/`. v3 still applies the firewall because it is in `run`. A successful start from login does not prove Termux:Boot worked. [Reboot proof](#161-prove-startup-before-the-first-login).
 
-`10-services.sh` can also be executed manually. This starts the supervisor and acquires the wake lock for the current boot; it does not register a boot trigger. Automatic boot requires the activated Termux:Boot app, the executable script and an enabled service.
+You can run `10-services.sh` manually. This starts the supervisor and takes the wake lock for the current boot. It does not register a boot trigger.
+
+Automatic startup needs the activated Termux:Boot app, an executable script and an enabled service.
 
 ### 12.4 Wake lock and battery cost
 
-`termux-wake-lock` is a persistent partial wake lock for the Termux app. It keeps the CPU available with the screen off and can prevent normal suspend, at a battery cost. The event-driven handler's lack of a polling timer does not remove this cost. The extra battery drain was not isolated quantitatively, and reliable calls/background availability without the lock have not been established.
+`termux-wake-lock` holds a persistent partial wake lock for Termux. It keeps the CPU available with the screen off and can prevent normal suspend. This costs battery power even though the handler uses no polling timer.
 
-Starting only `start-services.sh` at first installation does not acquire this boot script's lock. Section 13 runs the complete `10-services.sh` so the initial session uses the same policy as boot. `sv down yggdrasil` does not release the shared Termux lock; other Termux services may rely on it. If none do, `termux-wake-unlock` releases it. Do not add that command to `finish` unconditionally. See [Android wake lock guidance](https://developer.android.com/topic/performance/issues/excessive-wakelock).
+The extra battery drain was not measured separately. Reliable calls and background availability without the lock have not been established.
+
+Starting only `start-services.sh` during installation does not take the boot script's lock. Section 13 runs the full `10-services.sh` to use the same policy as boot.
+
+`sv down yggdrasil` does not release the shared Termux lock. Other services may need it. If none do, release it with `termux-wake-unlock`. Do not add that command unconditionally to `finish`. See [Android wake lock guidance](https://developer.android.com/topic/performance/issues/excessive-wakelock).
 
 ---
 
 ## 13. First launch
 
-Start the supervisor and acquire the same wake lock as the boot path in the current Android session:
+Start the supervisor with the same wake lock as boot:
 
 ```sh
 "$HOME/.termux/boot/10-services.sh"
 ```
 
-Allow the supervisor to notice a newly created or recreated service directory before enabling Yggdrasil:
+Wait for the supervisor to find a new or recreated service directory before enabling Yggdrasil:
 
 ```sh
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
@@ -1477,7 +1575,9 @@ else
 fi
 ```
 
-This checks readiness immediately, waits at most fifteen seconds, and enables the service only after `sv status` can communicate with its supervisor. Merely finding an old `supervise/ok` file would not prove that `runsv` is running. The check avoids `unable to open supervise/ok` when commands are executed immediately after recreating the directory. It adds no runtime polling.
+The check runs immediately and waits at most fifteen seconds. It enables the service only when `sv status` can reach its supervisor. An old `supervise/ok` file alone does not prove `runsv` is running.
+
+This avoids `unable to open supervise/ok` if you run commands immediately after recreating the directory. It adds no polling during normal operation.
 
 `sv-enable` removes the service's `down` file and requests that `runit` start it.
 
@@ -1503,9 +1603,9 @@ pgrep -af '[r]unsvdir'
 
 ## 14. Verify Yggdrasil and routing
 
-Do not consider the setup complete merely because `sv status` says `run`.
+A `run` result from `sv status` is not enough to confirm the setup.
 
-Verify each layer.
+Check each layer below.
 
 ### 14.1 Process
 
@@ -1595,7 +1695,7 @@ su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getP
 
 At least one peer should be `Up`.
 
-A peer that is temporarily `Down` does not necessarily indicate a local configuration problem. Public peers can disappear or change.
+A temporarily `Down` peer may not mean a local configuration problem. Public peers can disappear or change.
 
 ### 14.7 Real traffic
 
@@ -1625,7 +1725,7 @@ If that service is no longer online, use another current Yggdrasil service inste
 
 ## 15. Verify the firewall
 
-The firewall should be tested in both directions.
+Test the firewall in both directions.
 
 ### 15.1 Check initial counters
 
@@ -1667,7 +1767,7 @@ This proves that replies to connections initiated by the phone are allowed.
 
 For this test you need another machine connected to Yggdrasil.
 
-This is an **active test** requiring a second Yggdrasil node. Use an already-running SSH listener if available. Otherwise record that the SSH service was down, start it temporarily with `sv up sshd`, and stop it afterwards **only if this test started it**. Do not change an existing service's enable/disable state.
+This is an **active test** that needs a second Yggdrasil node. Use an existing SSH listener if available. Otherwise, confirm that SSH was down and start it temporarily with `sv up sshd`. Stop it afterward **only if this test started it**. Keep the service's existing enable/disable state.
 
 Verify the listener:
 
@@ -1721,17 +1821,19 @@ DROP counter increased       -> ip6tables dropped it
 no SYN-ACK left the phone    -> the TCP service was not reached
 ```
 
-If this test started SSH from a confirmed down state, restore that state with `sv down sshd`. Leave a service that was already running alone.
+If this test started SSH from a confirmed down state, restore that state with `sv down sshd`. Leave an already-running service alone.
 
 ---
 
 ## 16. Verify everything after reboot
 
-Reboot Android normally after completing setup. The following is a verification procedure, not a claim that v3 already passed reboot. Do not manually start services before collecting the startup times.
+Reboot Android normally after setup. Follow the checks below to verify your installation. Do not manually start services before collecting startup times.
 
 ### 16.1 Prove startup before the first login
 
-You cannot inspect the system from a Termux session before opening that session: the login profile can itself start `runsvdir`. After reboot, open the **first** Termux login and run the following read-only comparison immediately, before manual service commands. It reports Linux `/proc/PID/stat` field 22 (start time in ticks since boot) for the supervisor, daemon and currently surviving Termux login shells:
+A Termux login profile can itself start `runsvdir`. After reboot, open the **first** Termux login. Run this read-only comparison immediately, before any manual service commands.
+
+It reads Linux `/proc/PID/stat` field 22: the process start time in ticks since boot. It reports the supervisor, daemon and surviving Termux login shells:
 
 ```sh
 su -c "exec /data/data/com.termux/files/usr/bin/bash -s -- $(id -u)" <<'BOOT_CHECK'
@@ -1752,17 +1854,29 @@ done
 BOOT_CHECK
 ```
 
-Both `runsvdir` and Yggdrasil must have start times **earlier than the first login shell**. Divide ticks by `CLK_TCK` for seconds since boot. In the recorded v2 reboot they started at ~23 s, while the first login started at ~104 s: under this guide's sole boot trigger, that proves Termux:Boot started the service. v3 shares that startup/firewall logic but has not itself been reboot-tested.
+Both `runsvdir` and Yggdrasil must start **earlier than the first login shell**. Divide ticks by `CLK_TCK` to get seconds since boot.
 
-The command matches executable paths in the command line because Android process names can be truncated. You can inspect process names/arguments with `ps -eo pid,ppid,args`. If your shell uses another login convention, identify the first login PID there and read its stat with the same method. If the first login already exited, no login matches, the service was restarted, or another boot trigger exists, the snapshot cannot establish Termux:Boot attribution. Repeat the controlled check or use an independent early-boot observer. Merely finding a running service after login is not boot proof.
+In the recorded v2 reboot, they started at ~23 s. The first login started at ~104 s. With this guide's only boot trigger, those times prove Termux:Boot started the service. v3 uses the same startup/firewall logic but has not itself been reboot-tested.
+
+The command matches executable paths in command lines because Android can truncate process names. Inspect names and arguments with `ps -eo pid,ppid,args`. If your shell uses another login convention, find the first login PID there. Read its stat with the same method.
+
+The snapshot cannot prove Termux:Boot started the service if:
+
+- The first login has exited or no login matches.
+- The service has restarted.
+- Another boot trigger exists.
+
+Repeat the controlled check or use an independent early-boot observer. A running service after login is not boot proof.
 
 ### 16.2 State and connectivity after boot
 
-Then repeat the process, interface, routing, admin and application checks in [section 14](#14-verify-yggdrasil-and-routing), the [firewall checks](#15-verify-the-firewall), and the compatibility checks below. Confirm the enabled service has a live supervisor and fresh service logs. The HTTP example is optional; also test your actual application endpoint, since a public endpoint may be unavailable independently of Yggdrasil.
+Repeat the process, interface, routing, admin and application checks in [section 14](#14-verify-yggdrasil-and-routing). Repeat the [firewall checks](#15-verify-the-firewall) and compatibility checks below.
+
+Confirm that the enabled service has a live supervisor and fresh logs. The HTTP example is optional. Test your actual application endpoint too. A public endpoint may be unavailable even when Yggdrasil works.
 
 ### 16.3 Direct transport and VPN compatibility
 
-With the VPN connected, inspect both TCP and UDP sockets and discover the actual VPN TUN and marked physical uplink:
+With the VPN connected, inspect TCP and UDP sockets. Find the actual VPN TUN and the physical uplink selected with the mark:
 
 ```sh
 yggdrasil -version
@@ -1772,7 +1886,7 @@ su -c 'ip -br addr'
 su -c 'ip -4 route get 1.1.1.1 mark 0x20000'
 ```
 
-Check `0.5.14-direct.3` and the public outgoing peer mark `0x20000`. TCP shows its physical source; wildcard QUIC UDP sockets require a bounded capture to the selected peer to prove their actual physical path. An `up` peer alone is not application readiness.
+Check version `0.5.14-direct.3` and the public outgoing peer mark `0x20000`. TCP shows its physical source address. For wildcard QUIC UDP sockets, use a bounded capture to the selected peer to prove the physical path. An `up` peer alone does not prove application readiness.
 
 For the actual interface names found above (these are examples):
 
@@ -1781,7 +1895,9 @@ su -c 'ip -6 -o addr show dev tun0 scope global'
 su -c 'ip -6 -o addr show dev rmnet_data0 scope global'
 ```
 
-Eligible IPv4-only VPN TUNs should carry `fd43:<node low 112 bits>/128`; the primary physical interface should carry `fd42:<same bits>/128`. Networks with another global-scope IPv6 address need no owned ULA. Confirm an application requiring the VPN still uses it, and make a fresh call for ICE/audio verification. Keep the proof of pre-login startup separate from these state/connectivity checks.
+Eligible IPv4-only VPN TUNs should have `fd43:<node low 112 bits>/128`. The primary physical interface should have `fd42:<same bits>/128`. A network with another global-scope IPv6 address needs no owned ULA.
+
+Confirm that an application requiring the VPN still uses it. Make a fresh call to check ICE and audio. These checks confirm state and connectivity. The start-time comparison above proves pre-login startup.
 
 ---
 
@@ -1821,9 +1937,9 @@ rule 1000           -> removed
 table 200 route     -> removed with ygg0
 ```
 
-The firewall rules remain installed. They simply do not match while `ygg0` does not exist. The shared Termux wake lock also remains; release it only if no other service needs it. [Power policy](#124-wake-lock-and-battery-cost).
+The firewall rules remain installed. They do not match while `ygg0` is absent. The shared Termux wake lock also remains. Release it only if no other service needs it. [Power policy](#124-wake-lock-and-battery-cost).
 
-Stopping Yggdrasil removes ULA addresses added by this handler and restores the saved IPv6 flag where safe. A pre-existing address that it did not add is left unchanged. Restarting recreates eligible ULA addresses; existing native IPv6 is preserved.
+Stopping Yggdrasil removes ULAs added by this handler. It restores the saved IPv6 flag where safe. It leaves pre-existing addresses alone. Restarting adds eligible ULAs again and preserves existing native IPv6.
 
 ### Start
 
@@ -1831,7 +1947,7 @@ Stopping Yggdrasil removes ULA addresses added by this handler and restores the 
 sv up yggdrasil
 ```
 
-The service takes over any recorded previous session, checks the firewall, and recreates:
+The service takes over a recorded previous session, checks the firewall and recreates:
 
 ```text
 rule 1000
@@ -1867,7 +1983,7 @@ Then verify the active peerings:
 su -c "$PREFIX/bin/yggdrasilctl -endpoint=unix://$PREFIX/tmp/yggdrasil.sock getPeers"
 ```
 
-Current Yggdrasil versions do not reload the configuration with `SIGHUP`; use a service restart for persistent configuration changes.
+Current Yggdrasil versions do not reload configuration with `SIGHUP`. Restart the service to apply saved configuration changes.
 
 ### Disable autostart under runit
 
@@ -1904,15 +2020,15 @@ GOOS=android
 CGO_ENABLED=1
 ```
 
-On the tested system, the native Android/cgo build integrated with Android's resolver correctly, so no separate Termux `dnsmasq` was required.
+On the tested system, the native Android/cgo build worked correctly with Android's resolver. No separate Termux `dnsmasq` was needed.
 
-That matters because a custom DNS daemon can conflict with Android networking and tethering components.
+A custom DNS daemon can conflict with Android networking and tethering.
 
-The final design intentionally has no custom DNS service.
+This setup uses no custom DNS service.
 
 ### 18.2 Why `ygg0` is fixed
 
-Policy routing and firewall rules must refer to a deterministic interface.
+Routing and firewall rules need a fixed interface name.
 
 Therefore:
 
@@ -1932,13 +2048,13 @@ This guide uses:
 unix:///data/data/com.termux/files/usr/tmp/yggdrasil.sock
 ```
 
-The trade-off is that the socket is root-owned because the daemon runs as root, so control commands are also executed through root.
+The daemon runs as root, so the socket is root-owned. Control commands must also use root.
 
 ### 18.4 Why `runit`
 
-Yggdrasil needs root in this setup because it creates and manages a TUN interface and routing state.
+Yggdrasil needs root here to create and manage a TUN interface and routing state.
 
-`runit` provides a proper service lifecycle:
+`runit` provides service control:
 
 ```text
 run
@@ -1947,7 +2063,7 @@ restart
 status
 ```
 
-This is cleaner than launching a root daemon directly in the background from a boot script.
+This provides supervision when a root daemon started directly from a boot script would run without it.
 
 ### 18.5 Why Termux:Boot is still needed
 
@@ -1955,13 +2071,13 @@ Android does not automatically launch Termux's `runsvdir` after a device reboot.
 
 Termux:Boot supplies the Android boot trigger.
 
-The `10-services.sh` script starts `termux-services`, which starts `runsvdir`, which supervises Yggdrasil.
+`10-services.sh` starts `termux-services`. That starts `runsvdir`, which supervises Yggdrasil.
 
 ### 18.6 Why routing lives in `run`/`finish`
 
 Some existing Android guides place Yggdrasil routing in a separate Termux:Boot script.
 
-This guide instead ties routing to the lifecycle of the interface:
+This guide ties routing to the interface lifecycle:
 
 ```text
 service up
@@ -1971,13 +2087,13 @@ service down
 -> remove route state
 ```
 
-That makes `sv down yggdrasil` cleanly remove the Yggdrasil network interface and its policy rule without waiting for a reboot.
+`sv down yggdrasil` removes the interface and its policy rule without a reboot.
 
 ### 18.7 Why only rule 1000 is used
 
 Existing examples commonly add both source- and destination-based RPDB rules.
 
-The tested system was deliberately tested without rule `999`.
+This setup was tested without rule `999`.
 
 Outbound route selection still chose:
 
@@ -1989,17 +2105,19 @@ src <YGG_IP>
 
 and real outbound TCP worked.
 
-Inbound TCP was also tested while the firewall was temporarily absent: the phone produced the correct SYN-ACK through `ygg0` with only rule `1000`.
+Inbound TCP was tested with the firewall temporarily absent. The phone sent the correct SYN-ACK through `ygg0` with only rule `1000`.
 
-For this setup, rule `999` added no required behavior and was removed.
+This setup did not need rule `999`, so it was removed.
 
 ### 18.8 Why the firewall lives in run
 
-Applying the idempotent rules before each daemon start covers boot, login-triggered startup and runit restart. It closes the earlier gap where a login could start Yggdrasil without executing a separate boot firewall script. This is one-shot kernel setup inside the service; no additional supervised firewall process is needed. Rules remain after the daemon stops. [Firewall and AFWall+](#11-firewall).
+Applying rules without duplicates before each daemon start covers boot, starts from a login and runit restarts. Earlier, login could start Yggdrasil without running the separate boot firewall script.
+
+The service now applies the kernel rules once at startup. It needs no extra supervised firewall process. Rules remain after the daemon stops. [Firewall and AFWall+](#11-firewall).
 
 ### 18.9 Why the firewall uses conntrack
 
-Without state tracking, blocking all incoming Yggdrasil traffic would also block replies to connections initiated by the phone.
+Blocking all incoming Yggdrasil traffic without state tracking would also block replies to the phone's connections.
 
 `conntrack` distinguishes:
 
@@ -2010,7 +2128,7 @@ RELATED
 INVALID
 ```
 
-So the policy can allow replies while blocking unsolicited inbound connections.
+This allows replies while blocking unsolicited inbound connections.
 
 ### 18.10 Why Android firewall chains are not flushed
 
@@ -2022,25 +2140,34 @@ The Yggdrasil rules are appended to `INPUT` and match only:
 -i ygg0
 ```
 
-The guide intentionally does not alter the rest of Android's firewall topology.
+The guide leaves the rest of Android's firewall layout unchanged.
 
 ---
 
 ## 19. Updating Yggdrasil
 
-The VPN/physical ULA handler is Bash code in `run`; it requires no additional Yggdrasil source patch or build flag. Keep it when updating the binaries. The separate peer socket patch still needs review against each selected upstream release.
+The VPN/physical ULA handler is Bash code in `run`. It needs no extra Yggdrasil source patch or build flag. Keep it when updating binaries. Review the separate peer socket patch for each new upstream release.
 
-Check [upstream releases and release notes](https://github.com/yggdrasil-network/yggdrasil-go/releases), including the required Go version, configuration changes and peer/protocol compatibility. Choose a stable release tag deliberately; the examples below use the placeholder `vX.Y.Z`. They do not claim that an unreleased or untested version is compatible.
+Check [upstream releases and release notes](https://github.com/yggdrasil-network/yggdrasil-go/releases) for the required Go version, configuration changes and peer/protocol compatibility. Choose a stable release tag. The examples use the placeholder `vX.Y.Z`. They do not claim that an unreleased or untested version is compatible.
 
-Use the instructions for your installed profile. `main` builds upstream Yggdrasil; `webrtc-vpn-compat` adds the runit ULA handler; `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets; `ultimate` retains that patch and extends the common ULA handler to an IPv4-only physical Internet interface. An upstream binary installed over a direct build removes that socket patch. [Transport contract](../DIRECT-TRANSPORT.md).
+Use instructions for your installed profile:
 
-A normal update builds separately, validates the existing configuration, saves a rollback copy, then replaces **both** `yggdrasil` and `yggdrasilctl`. Keep the configuration, private key, `Peers`, `MulticastInterfaces`, `IfName`, `AdminListen`, service/boot scripts and firewall. Do not run `-genconf`: preserving the key preserves the node address. No full reinstall or reboot is needed for a normal binary-only update.
+- `main` builds upstream Yggdrasil.
+- `webrtc-vpn-compat` adds the runit ULA handler.
+- `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets.
+- `ultimate` keeps that patch and extends the ULA handler to IPv4-only physical Internet.
 
-Run the following stages in the same Termux shell, as its normal user. Save the printed source and backup paths; in a new shell, set `ygg_update_dir` and `ygg_backup_dir` to those paths again. If any command fails, stop at that stage; do not continue to installation.
+Installing an upstream binary over a direct build removes the socket patch. [Transport contract](../DIRECT-TRANSPORT.md).
+
+A normal update builds in a separate directory, validates the existing configuration and saves a rollback copy. It then replaces **both** `yggdrasil` and `yggdrasilctl`.
+
+Keep the configuration, private key, `Peers`, `MulticastInterfaces`, `IfName`, `AdminListen`, service/boot scripts and firewall. Do not run `-genconf`. Keeping the key keeps the node address. A normal binary-only update needs no full reinstall or reboot.
+
+Run all stages in the same Termux shell as the normal user. Save the printed source and backup paths. If you open a new shell, set `ygg_update_dir` and `ygg_backup_dir` to those paths again. Stop if any command fails. Do not continue to installation.
 
 ### 19.1 Clone the selected release into a fresh directory
 
-Replace `vX.Y.Z` before running this block. A fresh directory preserves earlier source trees and backups.
+Replace `vX.Y.Z` before running this block. A fresh directory keeps earlier source trees and backups intact.
 
 ```sh
 ygg_release='vX.Y.Z'
@@ -2051,11 +2178,15 @@ git clone --depth 1 --branch "$ygg_release" https://github.com/yggdrasil-network
 
 ### 19.2 Build and check the Android binaries
 
-Check the selected release's build instructions and Go requirement. The commands below retain this guide's Android PIE build and the linker workaround used for v0.5.14; a future release may need different flags. Build in Termux with `GOOS=android`, the phone's `GOARCH` and `CGO_ENABLED=1`. A generic Linux/arm64 release binary is not this Android build.
+Check the selected release's build instructions and Go requirement. The commands below use this guide's Android PIE build and the linker workaround for v0.5.14. A future release may need different flags.
 
-Before building, review the patch against the selected release. The supplied patch was tested on **v0.5.14**. Successful `git apply --check` only proves textual applicability; it does not prove the routing behavior remains correct. If it fails, adapt and review the patch for that release or keep the working version. Do not force a failed patch or fall back to an unpatched binary to retain VPN bypass. If upstream later implements equivalent behavior, review that implementation before deciding whether the local patch is still needed.
+Build in Termux with `GOOS=android`, the phone's `GOARCH` and `CGO_ENABLED=1`. A generic Linux/arm64 release binary is not equivalent.
 
-The example uses the patch from this guide's `ultimate` checkout and labels the candidate with its actual upstream version plus `-direct.local`:
+Review the patch against the selected release before building. It was tested on **v0.5.14**. A successful `git apply --check` means the patch fits the text. It does not prove correct routing behavior.
+
+If the check fails, adapt and review the patch or keep the working version. Do not force a failed patch. An unpatched binary cannot preserve this VPN bypass. If upstream adds equivalent behavior, review it before removing the local patch.
+
+This example uses the patch from the guide's `ultimate` checkout. It labels the build with the actual upstream version plus `-direct.local`:
 
 ```sh
 ygg_patch="$HOME/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch"
@@ -2064,7 +2195,7 @@ git -C "$ygg_update_dir" apply "$ygg_patch" &&
 (cd "$ygg_update_dir" && PKGVER="${ygg_release#v}-direct.local" ./build -p -l "-checklinkname=0")
 ```
 
-The suffix identifies a local build; it is not proof of VPN bypass.
+The suffix labels a local build. It does not prove VPN bypass.
 
 Check both binaries before stopping the running daemon:
 
@@ -2074,7 +2205,7 @@ go version -m "$ygg_update_dir/yggdrasil"
 go version -m "$ygg_update_dir/yggdrasilctl"
 ```
 
-Confirm the intended version, `GOOS=android`, the phone's architecture (arm64 on the tested device) and `CGO_ENABLED=1`. Build/metadata failures leave the current installation running.
+Confirm the intended version, `GOOS=android`, the phone's architecture and `CGO_ENABLED=1`. The tested device used arm64. Build or metadata failures leave the current installation running.
 
 ### 19.3 Save a private rollback copy and validate the existing configuration
 
@@ -2087,9 +2218,9 @@ cp -p "$PREFIX/etc/yggdrasil.conf" "$ygg_backup_dir/yggdrasil.conf" &&
 chmod 600 "$ygg_backup_dir/yggdrasil.conf"
 ```
 
-The directory created by `mktemp -d` is private. Never publish its configuration or key. Keep it until the new version is known to work.
+`mktemp -d` creates a private directory. Never publish its configuration or key. Keep the backup until the new version is known to work.
 
-Parse the live configuration with the candidate and compare its derived node address with the installed binary's result:
+Parse the installed configuration with the candidate binary. Compare its derived node address with the installed binary's result:
 
 ```sh
 "$ygg_update_dir/yggdrasil" -useconffile "$PREFIX/etc/yggdrasil.conf" -normaliseconf >/dev/null &&
@@ -2099,7 +2230,7 @@ cmp "$ygg_backup_dir/address.before" "$ygg_backup_dir/address.candidate" &&
 echo CONFIG_OK
 ```
 
-Only continue after `CONFIG_OK`. Normalized output is discarded; the installed config is not overwritten. If release notes require a config change, back it up first, make that change deliberately and validate again. Address comparison checks identity, not all future configuration semantics.
+Continue only after `CONFIG_OK`. The command discards normalized output and keeps the installed config unchanged. If release notes require a config change, back it up first. Make the change and validate again. Address comparison checks identity, not every future config behavior.
 
 ### 19.4 Replace only the two binaries
 
@@ -2112,7 +2243,7 @@ install -m 755 "$ygg_update_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
 sv -w 25 up yggdrasil
 ```
 
-The chained commands stop on failure. If installation fails after the service stops, restore **both** old binaries with section 19.6. This is a manual update, not an automatic rollback script.
+The chained commands stop on failure. If installation fails after the service stops, restore **both** old binaries with section 19.6. This manual update does not roll back automatically.
 
 ### 19.5 Verify before keeping the update
 
@@ -2128,15 +2259,21 @@ su -c '/system/bin/ip6tables -S INPUT'
 curl -6 --noproxy '*' --max-time 15 -I 'http://[324:71e:281a:9ed3::ace]/'
 ```
 
-Allow time for peers to reconnect. Confirm the original native node address, working peers, `ygg0`, rule `1000`, the `200::/7` route in table `200`, the three firewall rules and real overlay connectivity. The public HTTP endpoint is a test target whose availability may change. With multicast enabled and a compatible router on Wi-Fi, check that the local TLS peer returns too.
+Allow time for peers to reconnect. Check:
 
-For v3, verify `fd43:<node low 112 bits>/128` on an eligible IPv4-only VPN TUN and `fd42:<same bits>/128` on the current IPv4-only physical Internet interface. A native dual-stack interface needs no additional ULA. For the usual `tun0`:
+- The original native node address and working peers.
+- `ygg0`, rule `1000` and the `200::/7` route in table `200`.
+- The three firewall rules and real overlay connectivity.
+
+The public HTTP endpoint may become unavailable. If multicast is enabled and a compatible router is on Wi-Fi, check that the local TLS peer returns too.
+
+For v3, check `fd43:<node low 112 bits>/128` on an eligible IPv4-only VPN TUN. Check `fd42:<same bits>/128` on the current IPv4-only physical Internet interface. A native dual-stack interface needs no extra ULA. For the usual `tun0`:
 
 ```sh
 su -c "$PREFIX/bin/ip -6 addr show dev tun0"
 ```
 
-If the active VPN uses another `tunN` name, inspect that interface instead. Use `ip -4 route get 1.1.1.1 mark 0x20000` to identify the primary physical interface and inspect its addresses too. The handler remains in the existing runit script.
+If the VPN uses another `tunN` name, inspect it instead. Find the primary physical interface with `ip -4 route get 1.1.1.1 mark 0x20000`. Inspect its addresses too. The handler stays in the existing runit script.
 
 With the VPN active, inspect the **public outgoing peer** sockets (TCP and UDP):
 
@@ -2145,11 +2282,15 @@ su -c "$PREFIX/bin/ss -tnep"
 su -c "$PREFIX/bin/ss -ulnep"
 ```
 
-Their marks must include Android's `protectedFromVpn` bit (`0x20000`; the tested public sockets show `fwmark:0x20000`) and TCP source addresses must belong to the physical network. QUIC UDP sockets may appear as unconnected/wildcard sockets in `ss`; use a bounded packet capture to establish their actual physical path. A version suffix or route lookup alone does not prove bypass. Check that applications requiring the VPN still use its address. After an actual version change, verify public-peer traffic outside the VPN, Wi-Fi/mobile reconnection and a call with the VPN active; retain the backup until those checks pass.
+The socket marks must include Android's `protectedFromVpn` bit (`0x20000`). Tested public sockets show `fwmark:0x20000`. TCP source addresses must belong to the physical network.
+
+QUIC UDP sockets may appear as unconnected/wildcard sockets in `ss`. Use a bounded packet capture to prove their physical path. A version suffix or route lookup alone does not prove bypass. Check that applications requiring the VPN still use its address.
+
+After changing versions, verify public-peer traffic outside the VPN, Wi-Fi/mobile reconnection and a call with the VPN active. Keep the backup until those checks pass.
 
 ### 19.6 Roll back if the new version fails
 
-Set `ygg_backup_dir` to the saved backup path if this is a new shell, then restore both binaries:
+In a new shell, set `ygg_backup_dir` to the saved path first. Then restore both binaries:
 
 ```sh
 sv -w 25 down yggdrasil &&
@@ -2158,7 +2299,7 @@ install -m 755 "$ygg_backup_dir/yggdrasilctl" "$PREFIX/bin/yggdrasilctl" &&
 sv -w 25 up yggdrasil
 ```
 
-The normal update never changes the configuration. If you deliberately edited it for the new release, also restore the saved config:
+A normal update leaves the configuration unchanged. If you edited it for the new release, restore the saved config too:
 
 ```sh
 sv -w 25 down yggdrasil &&
@@ -2166,13 +2307,13 @@ install -m 600 "$ygg_backup_dir/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf" &&
 sv -w 25 up yggdrasil
 ```
 
-Repeat the checks in section 19.5 with the restored version. Keep the source and backup directories until no rollback is needed; remove only the specific directories you recorded, never an older backup as part of preparing the next update.
+Repeat section 19.5 checks with the restored version. Keep source and backup directories until you no longer need rollback. Remove only the directories you recorded. Do not delete an older backup while preparing the next update.
 
 ---
 
 ## 20. Removing the setup
 
-If you want to remove Yggdrasil while keeping Termux and `termux-services`:
+Follow these steps to remove Yggdrasil but keep Termux and `termux-services`.
 
 ### 20.1 Stop and disable the service
 
@@ -2196,7 +2337,11 @@ rm -rf "$PREFIX/var/service/yggdrasil"
 rm -f "$HOME/.termux/boot/05-ygg-firewall.sh"
 ```
 
-The firewall boot script only exists on older installations. Keep `10-services.sh` if you use other Termux services; otherwise remove it too. After the root session is fully stopped, the stale `$PREFIX/var/run/yggdrasil-root` record may be removed. Logs under `$PREFIX/var/log/sv/yggdrasil/` remain for diagnosis; remove them only if no longer needed. The shared wake lock remains until released with `termux-wake-unlock`; only release it if no other Termux service needs it.
+The firewall boot script exists only on older installations. Keep `10-services.sh` if you use other Termux services. Otherwise, remove it too.
+
+After the root session has fully stopped, you may remove the stale `$PREFIX/var/run/yggdrasil-root` record. Logs stay under `$PREFIX/var/log/sv/yggdrasil/` for diagnosis. Remove them only if no longer needed.
+
+The shared wake lock remains. Release it with `termux-wake-unlock` only if no other Termux service needs it.
 
 ### 20.4 Remove the currently loaded Yggdrasil firewall rules
 
@@ -2224,19 +2369,19 @@ rm -f "$PREFIX/bin/yggdrasilctl"
 
 ### 20.6 Configuration and identity
 
-Only delete the config if you are sure you do not want to keep the same Yggdrasil identity:
+Delete the config only if you no longer want the same Yggdrasil identity:
 
 ```sh
 rm -f "$PREFIX/etc/yggdrasil.conf"
 ```
 
-If you may reinstall later and want the same Yggdrasil address, back this file up instead.
+Back up this file if you may reinstall and want to keep the same address.
 
 ---
 
 ## 21. Sources and acknowledgements
 
-This guide is based on upstream documentation, existing Android/Termux approaches and direct testing of the final configuration.
+This guide draws on upstream documentation, existing Android/Termux approaches and tests of the final configuration.
 
 ### Yggdrasil
 
@@ -2324,9 +2469,9 @@ Zenfyr — Yggdrasil on Android:
 
 https://zenfyr.dev/notes/0004-yggdrasil-android/
 
-The final configuration in this installation guide is **not** a verbatim copy of either guide.
+The final configuration does **not** copy either guide word for word.
 
-Important differences include:
+The main differences are:
 
 - native Android/cgo build;
 - fixed `ygg0`;
@@ -2337,7 +2482,7 @@ Important differences include:
 - stateful `ip6tables` protection on `ygg0`;
 - firewall applied in `run` before every daemon start;
 - no custom `dnsmasq`;
-- reboot verification distinguishing pre-login boot startup from login-triggered startup (recorded v2 pass; v3 pending);
+- reboot checks compare boot startup with login startup (v2 passed; v3 pending);
 - tested inbound and outbound packet-flow behavior.
 
 ---
@@ -2376,9 +2521,9 @@ Android
     └── everything else     -> DROP
 ```
 
-No Android VPN API. No custom DNS daemon. No additional overlay-routing wrapper.
+The setup uses no Android VPN API, custom DNS daemon or extra overlay-routing wrapper.
 
-Just native Yggdrasil, Android TUN, policy routing, `runit`, an event-driven VPN/physical compatibility handler and a small stateful firewall.
+It uses native Yggdrasil, Android TUN, policy routing, `runit`, an event-driven VPN/physical compatibility handler and a small stateful firewall.
 
 ## License
 
