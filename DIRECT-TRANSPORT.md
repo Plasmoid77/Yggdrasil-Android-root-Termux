@@ -4,7 +4,7 @@ The complete installation procedure in this branch's [full installation guide](d
 
 For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks outgoing TCP-based and QUIC/UDP peer sockets with Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Android chooses the physical network. Normal `Peers` are used; interface names are not pinned.
 
-The existing runit service, ULA handler and firewall remain unchanged. This adds no network switching daemon or polling loop. Socket setup errors stop the connection. Other Termux/root processes keep their existing VPN path; no global routing or firewall bypass is installed.
+This branch retains the same peer socket patch and firewall. Its common runit ULA handler also covers the current IPv4-only physical Internet interface; [section 10.3](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) describes the separate compatibility layer. This adds no network switching daemon or polling loop. Socket setup errors stop the connection. Other Termux/root processes keep their existing VPN path; no global routing or firewall bypass is installed.
 
 The patch covers every outgoing peer scheme supported by Yggdrasil v0.5.14:
 
@@ -133,6 +133,12 @@ Some public peers timed out, and earlier attempts lost overlay reachability. The
 On 2026-10-10, a full Android reboot passed with `direct.3`, two QUIC peers and TCP/multicast disabled. A one-time Termux:Boot observer recorded the service, both marked UDP sockets and both completed peer handshakes about 28 seconds after boot. A second snapshot showed table `200` and automatic ULA restoration after the VPN appeared. The early capture recorded 122 peer UDP packets on `wlan0`, none on the VPN interface, with no kernel capture drops. The observer only read state and removed its boot entry after completion.
 
 Post-reboot checks preserved the node address/key and hashes of both binaries, the config and service/boot scripts. They confirmed the three firewall rules, routing, ULA, a fresh XMPP connection, HTTP 200, 20/20 ICMP replies (126.654 ms mean RTT), physical QUIC traffic and continued VPN access for Codex. No manual service start or repair preceded these checks. After verification, the original TCP peer configuration with Wi-Fi multicast was restored; QUIC support remains in the binary.
+
+### IPv4-only physical Internet and the ultimate handler
+
+On 2026-10-13, the final common handler passed on an IPv4-only mobile APN with AmneziaWG while the phone provided a hotspot. ICE connected in 0.443 seconds; the roughly 95-second call selected the two native Yggdrasil addresses after an initial relay pair. Sustained bidirectional UDP was captured between the nodes, and the user confirmed working audio. The peer sockets retained their protected-from-VPN marks and physical mobile source; other VPN traffic remained on the tunnel.
+
+The handler passed deletion/restoration on the real Internet interface and VPN TUN, ownership cleanup across service down/up, and model checks for uplink selection. It no longer adds addresses to IMS or hotspot downstream interfaces. Earlier transport/boot results above used previous runit profiles; no full Android reboot or Wi-Fi handover was performed with this final handler in this test.
 
 ## Updating to another upstream release
 

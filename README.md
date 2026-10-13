@@ -4,7 +4,7 @@ Native Yggdrasil node with a real `ygg0` interface, policy routing, runit superv
 
 **[Quick setup](QUICKSTART.md) · [Full installation guide](docs/INSTALL.md)**
 
-You are viewing the **`direct-vpn-bypass`** branch. This branch adds the ULA handler and a socket patch for outgoing TCP-based and QUIC peers. Android chooses the physical network, while those peer sockets bypass its VPN. [Transport details and measured results](DIRECT-TRANSPORT.md).
+You are viewing the **`ultimate`** branch. It combines direct TCP-based/QUIC peer transport with one event-driven IPv6 compatibility handler for IPv4-only VPNs and physical Internet networks. Android chooses the uplink; the handler excludes IMS and hotspot downstream interfaces. [Compatibility and checks](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) · [Transport details](DIRECT-TRANSPORT.md).
 
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
@@ -38,13 +38,13 @@ Android boot
                 │
                 ├── run
                 │   ├── starts one persistent root Bash session
-                │   ├── subscribes to link/address events
+                │   ├── subscribes to link/address/route/rule events
                 │   ├── adds RPDB rule 1000
                 │   ├── removes stale ygg0
                 │   ├── prepares /dev/net/tun
                 │   ├── starts Yggdrasil and waits for ygg0
                 │   ├── installs 200::/7 in table 200
-                │   ├── maintains ULA on matching VPN TUN interfaces
+                │   ├── maintains ULA on eligible VPN and Internet interfaces
                 │   └── supervises Yggdrasil, monitor and event worker
                 │
                 └── finish
@@ -83,6 +83,7 @@ Use the installation guide and QUICKSTART from the same branch.
 | [main](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/main) | Upstream Yggdrasil, routing, firewall and runit |
 | [webrtc-vpn-compat](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/webrtc-vpn-compat) | Adds the event-driven VPN ULA handler |
 | [direct-vpn-bypass](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass) | Adds marked outgoing TCP-based and QUIC peer sockets outside the VPN |
+| [ultimate](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/ultimate) | Combines direct peer transport and one ULA handler for IPv4-only VPN/Internet networks |
 
 The [full guide](docs/INSTALL.md) contains prerequisites, installation, Wi-Fi multicast, verification, service management, updates and removal.
 

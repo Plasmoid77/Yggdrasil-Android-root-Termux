@@ -4,9 +4,9 @@
 
 Native Yggdrasil node on rooted Android without the Android VPN API.
 
-The goal of this guide is to run the regular Yggdrasil userspace router directly on Android, create a real `ygg0` TUN interface, route only the Yggdrasil address space through it, supervise the daemon with `runit`, restore the firewall and service supervisor after reboot with Termux:Boot, and keep Android's normal network stack untouched.
+The goal of this guide is to run the regular Yggdrasil userspace router directly on Android, create a real `ygg0` TUN interface, route only the Yggdrasil address space through it, supervise the daemon with `runit`, restore the firewall and service supervisor after reboot with Termux:Boot, and preserve Android's existing Internet/VPN routing policy.
 
-This branch integrates a small VPN compatibility handler into the existing runit `run`. It restores a fixed ULA address on Android VPN TUN interfaces when they change, allowing new Conversations/WebRTC calls in the tested IPv4-only VPN case. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the reason, implementation and verified limits.
+The `ultimate` branch combines direct peer transport with one event-driven ULA handler for IPv4-only VPNs and the current physical Internet interface. It keeps the VPN ULA fixed and derives the physical ULA from the node identity. See [section 10.3](#103-android-vpn--webrtcvoip-compatibility) for the implementation, interface selection and tested limits.
 
 This branch also builds Yggdrasil v0.5.14 with a small socket patch for outgoing TCP-based and QUIC peers. Peer transport stays outside the Android VPN, while Android chooses Wi-Fi or mobile data. Other applications keep their existing VPN policy. No extra switching service is needed. [Transport details and measured results](../DIRECT-TRANSPORT.md).
 
@@ -84,7 +84,7 @@ All normal Android traffic keeps using Android's normal routing tables.
 
 Outgoing TCP-based and QUIC/UDP peer sockets carry Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Only those sockets bypass the VPN. Android selects the physical network for public peers; they are not bound to fixed Wi-Fi or mobile interface names. Local multicast discovery is limited separately to Wi-Fi interfaces named `wlanN`.
 
-The service also maintains `fd42::1/128` on UP TUN interfaces named `tunN`, using network events rather than a background polling timer. This addresses the tested WebRTC/VPN case described in section 10.3.
+The service maintains `fd42::1/128` on matching IPv4-only VPN TUN interfaces and a node-derived ULA on an IPv4-only physical Internet interface. It preserves existing IPv6, excludes IMS and hotspot downstream interfaces, and uses Netlink events without a polling timer. See section 10.3.
 
 The Yggdrasil daemon is supervised by `runit`, so it can be controlled with:
 
@@ -128,13 +128,13 @@ Android boot
                 │
                 ├── run
                 │   ├── starts one persistent root Bash session
-                │   ├── subscribes to link/address events
+                │   ├── subscribes to link/address/route/rule events
                 │   ├── adds RPDB rule 1000
                 │   ├── removes stale ygg0
                 │   ├── prepares /dev/net/tun
                 │   ├── starts Yggdrasil and waits for ygg0
                 │   ├── installs 200::/7 in table 200
-                │   ├── maintains ULA on matching VPN TUN interfaces
+                │   ├── maintains ULA on eligible VPN and Internet interfaces
                 │   └── supervises Yggdrasil, monitor and event worker
                 │
                 └── finish
@@ -261,7 +261,7 @@ First obtain this guide's patch:
 
 ```sh
 cd ~
-git clone --depth 1 --branch direct-vpn-bypass https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux.git yggdrasil-android-guide
+git clone --depth 1 --branch ultimate https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux.git yggdrasil-android-guide
 ```
 
 Then clone the pinned Yggdrasil release:
@@ -622,7 +622,7 @@ trap cleanup EXIT
 trap 'exit 0' TERM INT HUP
 
 # Subscribe before taking the initial snapshot so startup events are queued.
-coproc NET_EVENTS { exec ip -o monitor link address; }
+coproc NET_EVENTS { exec ip -o monitor link address route rule; }
 monitor_pid=$NET_EVENTS_PID
 children+=("$monitor_pid")
 # Duplicate the event stream so the background worker can read it.
@@ -643,18 +643,117 @@ done
 ((subscribed)) || { echo 'ERROR: Netlink subscription failed'; exit 1; }
 
 # Maintain one fixed ULA on UP TUN interfaces named tunN.
-ula=fd42::1/128
+# Derive the fixed address from this node and use it on physical interfaces too.
+# Add a local IPv6 path only to IPv4-only physical interfaces.
+# The same path now covers IPv4-only TUN interfaces as well.
+# These addresses are not public IPv6 connectivity or Yggdrasil identities.
+ula=
+primary_dev=
+declare -A ula_index=() ula_original=() ula_failed=()
+declare -A ula_window=() ula_updates=()
+
+init_ula() {
+    local index dev family address rest
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address =~ ^[23][0-9a-f]{2}:.*/7$ ]] || continue
+        # Preserve canonical formatting and the node's low 112 bits; avoid LAN duplicates.
+        ula="fd42:${address#*:}"
+        ula="${ula%/7}/128"
+        return 0
+    done < <(ip -6 -o addr show dev ygg0 scope global)
+    return 1
+}
+
+other_ipv6() {
+    local index dev family address rest
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address != "$ula" ]] && return 0
+    done <<< "$1"
+    return 1
+}
+
+release_ula() {
+    local dev=$1 current addresses ula=$ula
+    [[ $dev != tun* ]] || ula=fd42::1/128
+    [[ -n ${ula_index[$dev]:-} ]] || return 0
+    current=$(cat "/sys/class/net/$dev/ifindex" 2>/dev/null) || current=
+    if [[ $current == "${ula_index[$dev]}" ]]; then
+        ip -6 addr del "$ula" dev "$dev" 2>/dev/null || true
+        addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || addresses=
+        # Never disable IPv6 after the network acquires its own global address.
+        if [[ ${ula_original[$dev]} == 1 ]] && ! other_ipv6 "$addresses"; then
+            printf '1\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || true
+        fi
+    fi
+    unset 'ula_index[$dev]' 'ula_original[$dev]'
+}
+
+cleanup_ula() {
+    local dev
+    for dev in "${!ula_index[@]}"; do release_ula "$dev"; done
+}
+
 ensure_ula() {
-    local dev=$1 tun_flags link_flags addresses
-    [[ $dev =~ ^tun[0-9]+$ ]] || return 0
-    { read -r tun_flags < "/sys/class/net/$dev/tun_flags" &&
-      read -r link_flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || return 0
-    # Require TUN and UP; skip TAP and interfaces that are down.
-    (( (tun_flags & 1) && (link_flags & 1) )) || return 0
-    addresses=$(ip -6 -o addr show dev "$dev" 2>/dev/null) || return 0
+    local dev=$1 index flags ipv4 addresses disabled current tun_flags ula=$ula
+    [[ $dev != tun* ]] || ula=fd42::1/128
+    [[ -n $ula ]] || return 0
+    [[ $dev =~ ^(tun|rmnet_data|wlan)[0-9]+$ ]] || return 0
+    if [[ $dev == tun* ]]; then
+        read -r tun_flags < "/sys/class/net/$dev/tun_flags" 2>/dev/null || return 0
+        # Require TUN and UP; skip TAP and interfaces that are down.
+        ((tun_flags & 1)) || return 0
+    fi
+    [[ $dev == tun* || $dev == "$primary_dev" ]] || { release_ula "$dev"; return 0; }
+    { read -r index < "/sys/class/net/$dev/ifindex" &&
+      read -r flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || { release_ula "$dev"; return 0; }
+    if [[ ${ula_index[$dev]:-} != "$index" ]]; then
+        unset 'ula_index[$dev]' 'ula_original[$dev]'
+    fi
+    ipv4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null) || ipv4=
+    if (( !(flags & 1) )) || [[ -z $ipv4 ]]; then release_ula "$dev"; return 0; fi
+    addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || return 0
+    if other_ipv6 "$addresses"; then release_ula "$dev"; return 0; fi
     # Leave the address unchanged when it is already present.
     [[ $addresses == *"inet6 $ula "* ]] && return 0
-    ip -6 addr replace "$ula" dev "$dev" && echo "[VPN-ULA] Added $ula to $dev"
+    [[ ${ula_failed[$dev]:-} != "$index" ]] || return 0
+    read -r disabled < "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || return 0
+    [[ $disabled == 0 || $disabled == 1 ]] || return 0
+
+    # Stop an address-reset feedback burst instead of spending CPU in a loop.
+    if [[ ${ula_window[$dev]:-} != "$index:"* ]] ||
+       (( SECONDS - ${ula_window[$dev]#*:} >= 10 )); then
+        ula_window[$dev]="$index:$SECONDS"
+        ula_updates[$dev]=0
+    fi
+    if (( ${ula_updates[$dev]:-0} >= 4 )); then
+        echo "[ULA] Repeated resets on $dev; waiting for a later network event"
+        return 0
+    fi
+    ula_updates[$dev]=$(( ${ula_updates[$dev]:-0} + 1 ))
+    if [[ -z ${ula_index[$dev]:-} ]]; then
+        ula_index[$dev]=$index
+        ula_original[$dev]=$disabled
+    fi
+    current=$(cat "/sys/class/net/$dev/ifindex" 2>/dev/null) || current=
+    [[ $current == "$index" ]] || { release_ula "$dev"; return 0; }
+    if { [[ $disabled == 0 ]] || printf '0\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"; } &&
+       ip -6 addr replace "$ula" dev "$dev"; then
+        echo "[ULA] Added $ula to $dev"
+    else
+        release_ula "$dev"
+        ula_failed[$dev]=$index
+        echo "[ULA] Setup failed on $dev; waiting for interface recreation"
+    fi
+}
+
+refresh_primary() {
+    local route previous=$primary_dev
+    primary_dev=
+    route=$(ip -4 route get 1.1.1.1 mark 0x20000 2>/dev/null) || route=
+    [[ $route =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]] && primary_dev=${BASH_REMATCH[1]}
+    [[ $primary_dev != "$previous" ]] || return 0
+    [[ -z $previous ]] || ensure_ula "$previous"
+    [[ -z $primary_dev ]] || ensure_ula "$primary_dev"
 }
 
 # Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
@@ -673,7 +772,8 @@ children+=("$ygg_pid")
 
 # Wait up to 30 seconds for ygg0 to appear.
 for ((attempt=0; attempt<30; attempt++)); do
-    ip link show ygg0 >/dev/null 2>&1 && break
+    ip link show ygg0 >/dev/null 2>&1 &&
+        ip -6 -o addr show dev ygg0 scope global 2>/dev/null | grep -q '/7 ' && break
     kill -0 "$ygg_pid" 2>/dev/null || exit 1
     sleep 1
 done
@@ -682,14 +782,20 @@ ip -6 route replace 200::/7 dev ygg0 metric 128 table 200 || exit 1
 
 # Check existing interfaces once, then handle events without a timer.
 (
-    trap - EXIT TERM INT HUP
-    for path in /sys/class/net/tun[0-9]*; do ensure_ula "${path##*/}"; done
+    trap cleanup_ula EXIT
+    trap 'exit 0' TERM INT HUP
+    init_ula || { echo 'ERROR: Native Yggdrasil address is unavailable'; exit 1; }
+    refresh_primary
+    for path in /sys/class/net/tun[0-9]* /sys/class/net/rmnet_data[0-9]* /sys/class/net/wlan[0-9]*; do ensure_ula "${path##*/}"; done
     while IFS= read -r event <&3; do
         # Extract the interface name, including from address deletion events.
         read -r index dev rest <<< "${event#Deleted }"
-        [[ $index =~ ^[0-9]+:$ ]] || continue
-        dev=${dev%:}; dev=${dev%%@*}
-        ensure_ula "$dev"
+        if [[ $index =~ ^[0-9]+:$ && $dev != from ]]; then
+            dev=${dev%:}; dev=${dev%%@*}
+            ensure_ula "$dev"
+        else
+            refresh_primary
+        fi
     done
     exit 1
 ) &
@@ -822,170 +928,112 @@ with no `999` rule.
 
 ### 10.3 Android VPN + WebRTC/VoIP compatibility
 
-This branch includes an event-driven VPN compatibility workaround in the `run` script from section 9.1. The base Yggdrasil routing scheme remains the same.
+This branch uses one event-driven handler for two tested IPv4-only cases: an Android VPN and the phone's physical Internet network. The peer socket patch and the application's IPv6 compatibility are separate layers. Yggdrasil itself can transport its IPv6 overlay over IPv4 peers.
 
-The reproduced problem was:
+In a failed call, XMPP and Yggdrasil remained reachable, but WebRTC sent only an IPv4 host candidate. It emitted no IPv6 STUN traffic toward the Yggdrasil server. Rule `1000` cannot route packets that the application has not created.
 
-- Yggdrasil and ordinary XMPP traffic worked while an Android `VpnService` VPN was active;
-- Conversations calls worked without the VPN or when Conversations was excluded from it;
-- inside an IPv4-only VPN, WebRTC produced only the VPN IPv4 ICE candidate and no usable IPv6 path to Yggdrasil.
+An additional non-link-local IPv6 address on the relevant Internet/VPN interface enabled IPv6 ICE candidates in the successful tests. Putting that address only on `ygg0` or an unrelated dummy interface did not resolve the earlier VPN case. This is an Android/WebRTC compatibility workaround, not general IPv6 Internet service.
 
-The original packet-capture tests used:
+#### Addresses and interface selection
 
-```text
-LineageOS 23 / Android 16
-Conversations 2.20.3+free
-AmneziaVPN
-Yggdrasil v0.5.14
-```
-
-Adding a ULA to the VPN interface allowed calls to establish. Adding it to `ygg0` or a separate dummy interface did not fix this case. The current script uses the short, fixed address:
-
-```text
-fd42::1/128
-```
-
-#### Why the Yggdrasil route alone is not enough
-
-Rule `1000` can route a packet only after the application creates it. In the failing capture, WebRTC emitted no IPv6 STUN traffic toward Yggdrasil, so the correct `200::/7 -> ygg0` route had nothing to route.
-
-WebRTC's Android network monitor obtains network addresses through Android's network APIs and `LinkProperties`. The failing VPN had usable IPv4 but only link-local IPv6 (`fe80::`). Adding a non-link-local IPv6 address to that VPN interface was the successful workaround.
-
-The working explanation is that the additional address enables an IPv6 ICE socket/path that was unavailable before. The observed candidate and packet changes support this explanation; they do not establish every internal Android/WebRTC step or guarantee identical behaviour on another ROM.
-
-In the earlier successful capture, STUN and direct bidirectional UDP media appeared on `ygg0`. The media used the real Yggdrasil addresses, not the synthetic ULA.
-
-#### What the ULA does
-
-`fd42::1/128` is a local compatibility address on the VPN interface. It is not the node's Yggdrasil identity, a public Internet address or an IPv6 address supplied by the VPN server. `/128` assigns one address rather than a subnet.
-
-The script adds no default IPv6 route and does not change VPN server settings. Destination routing still follows:
-
-| Destination | Route |
+| Interface | Address and conditions |
 | --- | --- |
-| `200::/7` | Rule `1000`, table `200`, `ygg0` |
-| Other destinations | Existing Android/VPN routing policy |
+| Real UP TUN named `tunN` | `fd42::1/128`, when IPv4 exists and no other global-scope IPv6 address is present |
+| Current physical Internet interface named `rmnet_dataN` or `wlanN` | Node-derived ULA, with the same IPv4/IPv6 conditions |
+| IMS, hotspot downstream and other non-default physical interfaces | Left unchanged |
+| An interface with another global-scope IPv6 address | Existing IPv6 is preserved; the handler's own ULA is removed if present |
 
-On the tested device, rule `1000` is evaluated before Android's secure-VPN rules. Check this on another ROM:
+Linux `scope global` includes ULA addresses; it does not imply public Internet reachability. Link-local `fe80::` alone does not satisfy the handler's IPv6 condition.
 
-```sh
-su -c 'ip -6 rule show'
+For the physical ULA, replace the first 16-bit group of the native `ygg0` address with `fd42`, retain the remaining 112 bits and use `/128`. For example:
+
+```text
+Yggdrasil: 202:1234:5678:9abc:def0:1234:5678:9abc
+Local ULA: fd42:1234:5678:9abc:def0:1234:5678:9abc/128
 ```
 
-The ULA does not provide general IPv6 Internet access through an IPv4-only VPN. A dual-stack VPN keeps its existing IPv4 and IPv6 addresses alongside this additional address.
+Different node identities therefore do not deliberately share one fixed Wi-Fi address. Do not install the same fixed `fd42::1` on every phone's physical Wi-Fi interface: duplicate unicast addresses on a shared link can fail IPv6 duplicate-address detection. See [RFC 4862 section 5.4](https://www.rfc-editor.org/rfc/rfc4862.html#section-5.4). The fixed VPN address lives on each phone's separate TUN, not the shared Wi-Fi link.
 
-#### Why the address is maintained automatically
+An earlier candidate used the same node-derived ULA on VPN and physical interfaces. Calls failed on this phone with an IPv4-only mobile APN and VLESS. A later control with `fd42::1` on the VPN succeeded with AmneziaWG. The VPN profile changed between those captures, so this does not isolate identical addresses as the sole cause. This branch keeps the successful address policy while sharing the state-management code.
 
-A VPN reconnect can destroy its TUN interface and create a new one. The new interface loses manually added addresses even if its name is still `tun0`; the name can also change to `tun1`.
+#### What the handler changes
 
-The service therefore maintains the ULA for the lifetime of `run`. It subscribes to:
+The handler enables IPv6 on an eligible interface only when required, records its original `disable_ipv6` value and interface index, and adds its ULA. It adds no default route or firewall rule. Yggdrasil packets still use:
 
-```sh
-ip -o monitor link address
+```text
+priority 1000, destination 200::/7, table 200, dev ygg0
 ```
 
-This listens for kernel Netlink events. After confirming the subscription, the service checks existing interfaces once, then waits for link or address changes. Subscribing first queues events that occur during startup.
+The native Yggdrasil key/address remains unchanged. Successful STUN and media use that overlay identity; the ULA is a local compatibility address.
 
-For each event, the handler checks the current interface state:
+To select the physical Internet interface, the worker performs a kernel route lookup:
 
-1. Its name must match `tunN`, such as `tun0` or `tun1`.
-2. Its `tun_flags` must identify a TUN interface, and its link flags must include `UP`.
-3. If `fd42::1/128` is already present, no address command is run.
-4. Otherwise, the handler adds that address with `ip -6 addr replace`.
+```sh
+ip -4 route get 1.1.1.1 mark 0x20000
+```
 
-Adding the address generates another event. The next check finds it already present and makes no change. Deleting the address on a live interface triggers restoration; deleting the interface itself is ignored until a suitable interface appears again.
+This sends no packet and performs no DNS query. It uses the same protected-from-VPN bit as the peer sockets. Only the returned `dev` is eligible for physical ULA setup. A hotspot interface is a downstream network, even though its name starts with `wlan`; it is not automatically an Internet uplink. IMS bearers are also excluded by this selection.
 
-This is a deliberately small detector for the tested Android `VpnService` interface convention. It matches UP TUN interfaces named `tunN`; it does not ask Android whether each matching interface is a registered VPN. Other root-created TUN interfaces with those names also match. Interfaces with other names are outside this workaround's scope.
+#### Events and cleanup
 
-The script uses the same check for IPv4-only and dual-stack VPNs, keeping one fixed ULA on each matching interface. It does not need a separate address-family policy.
+The existing root Bash session subscribes before the initial snapshot:
 
-#### Why one root session and one runit service
+```sh
+ip -o monitor link address route rule
+```
 
-The complete service block runs inside one persistent Termux Bash process started by `su`. Address events do not create new root sessions or repeated Magisk permission notifications. A service restart or a manually invoked root command can still show a notification.
+Link/address events check the named interface. Route/rule events refresh the cached physical uplink and check the old/new interface when it changes. This handles a late Android route update without a polling timer or a separate network-switching service.
 
-There is no five-second background polling loop and no recurring `dumpsys` call. The two bounded startup waits serve different purposes: up to five seconds to confirm the Netlink subscription, and up to thirty seconds for `ygg0` to appear.
+Deleting an owned ULA triggers restoration. Link down, loss of IPv4, physical uplink change and service shutdown remove only the handler's own address. The original IPv6 flag is restored only on the same interface index and only when doing so would not disable another global-scope IPv6 address. An existing ULA that the handler did not add is not claimed or deleted.
 
-The root shell owns three children: Yggdrasil, `ip monitor` and the event worker. `wait -n` detects the first child exit, and the cleanup trap stops and reaps the others. An enabled runit service can restart the complete group if one component fails.
+A failed mutation stops retries until the interface is recreated. At most four additions per interface are attempted within ten seconds; further attempts wait for a later network event. No timed retry is added.
 
-The outer shell remains waiting for `su` instead of being replaced with it. This preserves the stop path through the existing `finish`, which stops Yggdrasil; its exit releases the root shell's wait and cleans up the monitor and worker.
-
-Everything remains in the existing `run` file. No separate watchdog service, boot-time address loop or permanent installer is needed. The quoted `YGG_ROOT` here-document keeps its contents for the root Bash to interpret. Bash supplies the arrays, regular expressions, coprocess and `wait -n` used by the handler; the outer shell is still `sh`.
+Everything stays in `run`. One root shell owns Yggdrasil, the Netlink monitor and the event worker. `wait -n` detects a child exit, cleanup stops/reaps the rest, and runit restarts the enabled service. There are no new permanent services, recurring `dumpsys` calls, polling loops or additional wakelocks.
 
 #### Verify the installed service
 
-After installing the updated `run`, restart an existing service with:
+Restart an existing installation after replacing `run`:
 
 ```sh
 sv restart yggdrasil
-```
-
-Connect a VPN and identify its interface:
-
-```sh
 su -c 'ip -br addr'
+su -c 'ip -4 route get 1.1.1.1 mark 0x20000'
 ```
 
-For a matching interface such as `tun0`, verify the ULA:
+With an IPv4-only VPN connected, inspect its actual `tunN`:
 
 ```sh
-su -c 'ip -6 -o addr show dev tun0'
+su -c 'ip -6 -o addr show dev tun0 scope global'
 ```
 
-Expected address:
+Expect `fd42::1/128`, unless another global-scope IPv6 address is already present. For an IPv4-only physical Internet interface, inspect the `dev` returned by the marked route lookup and expect the node-derived ULA. A native dual-stack interface needs no added ULA.
 
-```text
-fd42::1/128
-```
-
-Reconnect the VPN and repeat the check on the current interface. A recreated interface should acquire the same ULA without restarting Yggdrasil. If you change the `ula` setting, reconnect the VPN once to discard the previous address.
-
-For a known Yggdrasil destination, check route selection:
+For the actual Yggdrasil server, verify `dev ygg0`, table `200` and the native source address:
 
 ```sh
-su -c 'ip -6 route get <YGGDRASIL_IPV6>'
+su -c 'ip -6 route get <YGGDRASIL_SERVER_IPV6>'
 ```
 
-Expected properties:
-
-```text
-dev ygg0
-table 200
-src <YOUR_YGG_IP>
-```
-
-To inspect the media path during a call:
+Then make a new call. A running service, an address in `ip addr` or connected peers alone do not prove that WebRTC gathered IPv6 candidates. During the call, check overlay UDP:
 
 ```sh
 su -c 'tcpdump -ni ygg0 -tttt -vv udp'
 ```
 
-Repeat the normal firewall and reboot verification in sections 15 and 16. A running service alone does not prove successful routing, call establishment or boot recovery.
+Repeat after a VPN reconnect and a Wi-Fi/mobile transition without restarting Yggdrasil. Test reboot separately using sections 15 and 16. Preserve the configuration/key when upgrading from an earlier branch.
 
-#### Tested behaviour and remaining limitation
+#### Evidence and limits
 
-The event-driven service was tested with Amnezia Premium's IPv4-only VPN and a self-hosted Amnezia dual-stack VPN:
+The IPv4-only APN test used LineageOS 23 / Android 16, Conversations 2.20.4+free and Yggdrasil 0.5.14-direct.3. A successful control call with AmneziaWG gathered native Yggdrasil and TURN candidates, connected ICE in about 0.5 seconds and lasted about 46 seconds; the user confirmed working audio. Another phone on an IPv4-only APN had previously succeeded after adding physical IPv6/ULA, without a VPN during the captured test.
 
-| Test | Observed result |
-| --- | --- |
-| Start a new call after connecting or disconnecting either VPN | Calls worked |
-| Incoming calls with the updated service | Calls could be received and answered |
-| Disconnect the IPv4-only VPN during an active call | Call survived a brief audio interruption |
-| Enable the IPv4-only VPN during an active call | Conversations stayed in reconnecting state |
-| Enable or disable the tested dual-stack VPN during an active call | Call survived a brief audio interruption |
+After installing and restarting the final common handler, a further call connected ICE in 0.443 seconds and ran for about 95 seconds. Candidate selection switched from an initial Yggdrasil TURN relay to the two native node addresses, and the capture recorded sustained bidirectional UDP between them. This test used the IPv4-only mobile APN, AmneziaWG and an active hotspot; the Internet uplink was mobile, not Wi-Fi.
 
-Restoring an address does not restart ICE or migrate the application's existing sockets. The cause of the IPv4-only mid-call failure has not been established. The two VPN profiles also differ in server and configuration, so the comparison does not isolate address family as the only cause.
+The final common handler passed 30 state-model tests, real-kernel interface tests, deletion/restoration on the actual mobile Internet interface, VPN ULA deletion/restoration and full service down/up cleanup. Original identity/configuration/binaries, firewall and IPv4/IPv6 policy rules were preserved. The physical handler no longer adds ULA to hotspot or IMS interfaces.
 
-#### Boundaries to preserve when changing this code
+Earlier Wi-Fi, QUIC, long-call and Android boot results in [DIRECT-TRANSPORT.md](../DIRECT-TRANSPORT.md) belong to the previous published runit profile. They are useful transport evidence but do not establish that every scenario was repeated with this handler. Other ROMs, network naming conventions and VPN configurations require their own checks.
 
-- Keep the Yggdrasil destination rule and table `200`; the ULA is not a replacement route or source identity.
-- Keep the subscription before the initial snapshot, and check current state before adding an address.
-- Keep interface type/name filtering and the address-presence check; unrelated events and our own address events must not cause repeated writes.
-- Keep root privilege acquisition outside the event loop.
-- Keep Yggdrasil, monitor and worker tied to the same runit lifecycle, including cleanup on child exit.
-- Keep the complete `run` examples in this installation guide and [QUICKSTART](../QUICKSTART.md) identical when editing either guide.
-- Treat call recovery during a network switch as a separate application/ICE problem until packet captures and application logs establish its cause.
+The handler does not restart ICE or migrate an active call's existing sockets. Adding or switching a VPN mid-call is not guaranteed seamless. Android `LinkProperties` can also differ from the kernel address list; the precise internal cause of the original candidate suppression was not isolated. [WebRTC Android network monitor source](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java).
 
-Implementation references are listed in section 21. These constraints document the reason for the code so later edits can be reviewed without the original debugging conversation.
 
 ### 10.4 Direct peer transport
 
@@ -1002,7 +1050,7 @@ Yggdrasil peer sockets should have `fwmark:0x20000` and a physical-network sourc
 
 The ULA remains necessary for the tested Conversations/WebRTC context inside an IPv4-only VPN. Its purpose is separate from transporting Yggdrasil peer connections outside the VPN. Calls use the real Yggdrasil address on `ygg0`, not the ULA. Any relay inside Yggdrasil is separate from the phone's Amnezia tunnel.
 
-With the earlier `direct.2` build, Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from this branch and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](../DIRECT-TRANSPORT.md).
+With the earlier `direct.2` build, Wi-Fi → mobile → Wi-Fi transitions passed without restarting Yggdrasil. Calls were verified separately with Amnezia Premium XRay and AmneziaWG: bidirectional media used `ygg0`, peer TCP transport used physical Wi-Fi, and the other application's VPN connection remained available. A clean reinstall from the previous `direct-vpn-bypass` profile and a full Android reboot also passed: an early Termux:Boot snapshot confirmed automatic service startup, both physical-source marked peer sockets and the restored firewall. Post-reboot checks confirmed routing, overlay HTTP and automatic ULA restoration after the VPN connected. See [transport verification and limits](../DIRECT-TRANSPORT.md).
 
 The `direct.3` build subsequently passed QUIC-only Wi-Fi/mobile handover and a full reboot. Calls with VLESS/Xray, including a Wi-Fi call lasting more than an hour, were reported successful; AmneziaWG was checked for XMPP connectivity on mobile data. The captures did not record call media, and a QUIC-only call with AmneziaWG was not separately confirmed. See [QUIC verification and its limits](../DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot). The temporary tests disabled TCP peers and multicast; normal peer and multicast settings were restored afterward.
 
@@ -1690,7 +1738,7 @@ su -c "$PREFIX/bin/ss -tnep"
 su -c 'ip -6 -o addr show dev tun0'
 ```
 
-Check `0.5.14-direct.3`, physical-source peer sockets with `fwmark:0x20000`, and `fd42::1/128` on the current VPN TUN interface (replace `tun0` if needed). Also verify an application that requires the VPN still connects through it.
+Check `0.5.14-direct.3` and physical-source peer sockets with `fwmark:0x20000`. For eligible IPv4-only interfaces, verify `fd42::1/128` on the current VPN TUN and the node-derived ULA on the current physical Internet interface. Existing global-scope IPv6 is preserved. Also verify an application that requires the VPN still connects through it.
 
 If all of the above succeeds without manually launching anything, the installation has survived a full Android reboot correctly.
 
@@ -1734,7 +1782,7 @@ table 200 route     -> removed with ygg0
 
 The firewall rules remain installed. They simply do not match while `ygg0` does not exist.
 
-Stopping Yggdrasil does not remove an existing ULA from a separate VPN interface. The address disappears when that VPN interface is destroyed; automatic restoration runs again when the Yggdrasil service starts.
+Stopping Yggdrasil removes ULA addresses added by this handler and restores the saved IPv6 flag where safe. A pre-existing address that it did not add is left unchanged. Restarting recreates eligible ULA addresses; existing native IPv6 is preserved.
 
 ### Start
 
@@ -1748,8 +1796,8 @@ The service recreates:
 rule 1000
 ygg0
 table 200 route
-link/address event monitor
-ULA handler for existing and future matching TUN interfaces
+link/address/route/rule event monitor
+ULA handler for eligible VPN TUN and current Internet interfaces
 ```
 
 ### Restart
@@ -1950,9 +1998,11 @@ The guide intentionally does not alter the rest of Android's firewall topology.
 
 ## 19. Updating Yggdrasil
 
+The VPN/physical ULA handler is Bash code in `run`; it requires no additional Yggdrasil source patch or build flag. Keep it when updating the binaries. The separate peer socket patch still needs review against each selected upstream release.
+
 Check [upstream releases and release notes](https://github.com/yggdrasil-network/yggdrasil-go/releases), including the required Go version, configuration changes and peer/protocol compatibility. Choose a stable release tag deliberately; the examples below use the placeholder `vX.Y.Z`. They do not claim that an unreleased or untested version is compatible.
 
-Use the instructions for your installed profile. `main` builds upstream Yggdrasil; `webrtc-vpn-compat` adds the runit ULA handler; `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets. An upstream binary installed over a direct build removes that socket patch. [Direct profile](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/blob/direct-vpn-bypass/docs/INSTALL.md#19-updating-yggdrasil).
+Use the instructions for your installed profile. `main` builds upstream Yggdrasil; `webrtc-vpn-compat` adds the runit ULA handler; `direct-vpn-bypass` also patches outgoing TCP-based and QUIC/UDP peer sockets; `ultimate` retains that patch and extends the common ULA handler to an IPv4-only physical Internet interface. An upstream binary installed over a direct build removes that socket patch. [Direct profile](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/blob/ultimate/docs/INSTALL.md#19-updating-yggdrasil).
 
 A normal update builds separately, validates the existing configuration, saves a rollback copy, then replaces **both** `yggdrasil` and `yggdrasilctl`. Keep the configuration, private key, `Peers`, `MulticastInterfaces`, `IfName`, `AdminListen`, service/boot scripts and firewall. Do not run `-genconf`: preserving the key preserves the node address. No full reinstall or reboot is needed for a normal binary-only update.
 
@@ -1975,7 +2025,7 @@ Check the selected release's build instructions and Go requirement. The commands
 
 Before building, review the patch against the selected release. The supplied patch was tested on **v0.5.14**. Successful `git apply --check` only proves textual applicability; it does not prove the routing behavior remains correct. If it fails, adapt and review the patch for that release or keep the working version. Do not force a failed patch or fall back to an unpatched binary to retain VPN bypass. If upstream later implements equivalent behavior, review that implementation before deciding whether the local patch is still needed.
 
-The example uses the patch from this guide's `direct-vpn-bypass` checkout and labels the candidate with its actual upstream version plus `-direct.local`:
+The example uses the patch from this guide's `ultimate` checkout and labels the candidate with its actual upstream version plus `-direct.local`:
 
 ```sh
 ygg_patch="$HOME/yggdrasil-android-guide/patches/android-peer-vpn-bypass.patch"
@@ -2050,7 +2100,7 @@ curl -6 --noproxy '*' --max-time 15 -I 'http://[324:71e:281a:9ed3::ace]/'
 
 Allow time for peers to reconnect. Confirm the original native node address, working peers, `ygg0`, rule `1000`, the `200::/7` route in table `200`, the three firewall rules and real overlay connectivity. The public HTTP endpoint is a test target whose availability may change. With multicast enabled and a compatible router on Wi-Fi, check that the local TLS peer returns too.
 
-For this branch's ULA handler, also verify that an active matching VPN TUN interface still has `fd42::1/128`. For the usual `tun0`:
+For this branch's ULA handler, verify `fd42::1/128` on an eligible IPv4-only VPN TUN and the node-derived ULA on the current IPv4-only physical Internet interface. A native dual-stack interface needs no additional ULA. For the usual `tun0`:
 
 ```sh
 su -c "$PREFIX/bin/ip -6 addr show dev tun0"
@@ -2252,7 +2302,7 @@ Important differences include:
 - fixed `ygg0`;
 - UNIX admin socket;
 - routing tied to `runit` lifecycle;
-- event-driven VPN ULA restoration inside the same service;
+- event-driven VPN and physical Internet ULA restoration inside the same service;
 - only destination rule `1000`, without source rule `999`;
 - stateful `ip6tables` protection on `ygg0`;
 - firewall persistence through Termux:Boot;
