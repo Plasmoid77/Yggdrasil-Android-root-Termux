@@ -1,6 +1,6 @@
 # Direct Yggdrasil peer transport outside an Android VPN
 
-The complete installation procedure in this branch's [full installation guide](docs/INSTALL.md) and [QUICKSTART](QUICKSTART.md) includes this patch. The commands below also describe applying it to an existing node.
+The complete installation procedure in this branch's [full installation guide](docs/INSTALL.md) and [QUICKSTART](QUICKSTART.md) includes this patch. This document describes the transport patch; installing the v3 service profile is a separate step.
 
 For the rooted setup in this guide, a small patch to Yggdrasil v0.5.14 marks outgoing TCP-based and QUIC/UDP peer sockets with Android's `protectedFromVpn` bit (`SO_MARK=0x20000`). Android chooses the physical network. Normal `Peers` are used; interface names are not pinned.
 
@@ -44,41 +44,9 @@ PKGVER=0.5.14-direct.3 ./build -p -l "-checklinkname=0"
 
 ## Install on an existing node
 
-Create a fresh backup directory before replacing the binary. Keep this backup private:
+Use [installation guide section 19](docs/INSTALL.md#19-updating-yggdrasil) for the binary update and rollback procedure. It validates the configuration and identity, saves a private backup, stops on command failure and replaces **both** `yggdrasil` and `yggdrasilctl`. Keep the existing key, peers and multicast policy; applying the transport patch does not require changing them.
 
-```sh
-backup_dir=$(mktemp -d "$HOME/yggdrasil-before-direct.XXXXXX")
-printf 'Backup: %s\n' "$backup_dir"
-cp -p "$PREFIX/bin/yggdrasil" "$backup_dir/yggdrasil"
-cp -p "$PREFIX/etc/yggdrasil.conf" "$backup_dir/yggdrasil.conf"
-chmod 600 "$backup_dir/yggdrasil" "$backup_dir/yggdrasil.conf"
-```
-
-Edit the existing configuration. Do not generate a new identity. Use two or three current nearby peers using any supported transport in `Peers`, then set these fields:
-
-```text
-InterfacePeers: {}
-Listen: []
-MulticastInterfaces: [
-  {
-    Regex: "^wlan[0-9]+$"
-    Beacon: true
-    Listen: true
-    Port: 0
-    Priority: 0
-  }
-]
-```
-
-This enables built-in Wi-Fi discovery and advertisement using IPv6 link-local multicast. The regular `Listen: []` does not disable the listener created by multicast. The Wi-Fi regex does not bind public peers to Wi-Fi or add a network switching service. See [multicast details](docs/INSTALL.md#wi-fi-multicast-discovery).
-
-Install the patched daemon and start the same service:
-
-```sh
-sv -w 25 down yggdrasil
-install -m 755 ~/yggdrasil-go/yggdrasil "$PREFIX/bin/yggdrasil"
-sv -w 25 up yggdrasil
-```
+A binary-only update does not migrate an older service to ultimate v3. For distinct VPN/physical ULAs, previous-session takeover, firewall-before-daemon setup, event batching and logging, also follow [the service migration instructions](docs/INSTALL.md#95-upgrading-an-existing-service-profile). Stop an older unrecorded session through its supervisor before replacing its script. Built-in Wi-Fi multicast remains independent of public peer transport; see [multicast details](docs/INSTALL.md#wi-fi-multicast-discovery).
 
 ## Verify
 
@@ -136,9 +104,11 @@ Post-reboot checks preserved the node address/key and hashes of both binaries, t
 
 ### IPv4-only physical Internet and the ultimate handler
 
-On 2026-10-13, the final common handler passed on an IPv4-only mobile APN with AmneziaWG while the phone provided a hotspot. ICE connected in 0.443 seconds; the roughly 95-second call selected the two native Yggdrasil addresses after an initial relay pair. Sustained bidirectional UDP was captured between the nodes, and the user confirmed working audio. The peer sockets retained their protected-from-VPN marks and physical mobile source; other VPN traffic remained on the tunnel.
+On 2026-10-13, the then-current 207-line common handler passed on an IPv4-only mobile APN with AmneziaWG while the phone provided a hotspot. ICE connected in 0.443 seconds; the roughly 95-second call selected the two native Yggdrasil addresses after an initial relay pair. Sustained bidirectional UDP was captured between the nodes, and the user confirmed working audio. The peer sockets retained their protected-from-VPN marks and physical mobile source; other VPN traffic remained on the tunnel.
 
-The handler passed deletion/restoration on the real Internet interface and VPN TUN, ownership cleanup across service down/up, and model checks for uplink selection. It no longer adds addresses to IMS or hotspot downstream interfaces. Earlier transport/boot results above used previous runit profiles; no full Android reboot or Wi-Fi handover was performed with this final handler in this test.
+The handler passed deletion/restoration on the real Internet interface and VPN TUN, ownership cleanup across service down/up, and model checks for uplink selection. Primary-uplink selection excluded IMS and hotspot downstream interfaces on the tested phone; it is not a semantic network blacklist. Earlier transport/boot results above used previous runit profiles; no full Android reboot or Wi-Fi handover was performed with that 207-line handler in this test.
+
+The 276-line v3 service subsequently passed IPv4-only mobile/Amnezia calls and calls after mobile ↔ Wi-Fi transitions on 2026-10-14. It uses distinct key-derived `fd42:` physical and `fd43:` VPN helpers. Controlled A/B with an identical ULA on both networks produced zero IPv6 candidates and ICE FAILED; the different-address control connected. Reboot and orphan-takeover evidence belongs to v2 with the same startup/takeover logic; v3 itself has not been reboot-tested. See the [current verification matrix](docs/INSTALL.md#evidence-and-limits).
 
 ## Updating to another upstream release
 
@@ -146,13 +116,6 @@ Follow [installation guide section 19](docs/INSTALL.md#19-updating-yggdrasil) fo
 
 ## Restore
 
-Set `backup_dir` to the saved backup path if using a new shell, then restore:
-
-```sh
-sv -w 25 down yggdrasil
-install -m 755 "$backup_dir/yggdrasil" "$PREFIX/bin/yggdrasil"
-install -m 600 "$backup_dir/yggdrasil.conf" "$PREFIX/etc/yggdrasil.conf"
-sv -w 25 up yggdrasil
-```
+Use [installation guide section 19.6](docs/INSTALL.md#196-roll-back-if-the-new-version-fails) to restore both binaries from the saved private backup, stopping on command failure. Restore the configuration only if you deliberately changed it. If the service scripts were migrated too, restore their saved versions while the service is stopped and repeat the checks for that profile.
 
 Keep the patch when rebuilding this version. An unpatched replacement binary does not provide this socket behavior; recheck the patch and socket path for newer versions.

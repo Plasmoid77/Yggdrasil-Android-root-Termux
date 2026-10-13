@@ -20,7 +20,9 @@ Use the same signing source for both APKs (F-Droid or official GitHub releases);
 1. **Install Termux:Boot as an Android app**, using matching signatures with Termux. It is not installed by `pkg`.
 2. **Open Termux:Boot once through its launcher icon** to enable automatic execution at boot. Opening Termux does not replace this step.
 
-The steps below create both boot scripts and enable the service. After completing them, you do not need to open Termux after every reboot. [Official Termux:Boot instructions](https://github.com/termux/termux-boot#how-to-use).
+The steps below create one `10-services.sh` boot script and enable the service; `run` installs the firewall before each daemon start. After completing them, you do not need to open Termux after every reboot. [Official Termux:Boot instructions](https://github.com/termux/termux-boot#how-to-use).
+
+Android 12+ can kill the Termux supervisor while root Yggdrasil keeps running. v3 safely takes over that surviving session when login or boot restores supervision. Optional phantom-process settings apply globally to all apps; keeping the default means a failed daemon cannot be restarted while its supervisor is absent. Read [background restrictions](docs/INSTALL.md#31-optional-android-child-process-restrictions). The boot script also takes a persistent wake lock, with a battery cost. [Power policy](docs/INSTALL.md#124-wake-lock-and-battery-cost).
 
 ## 2. Install packages
 
@@ -71,7 +73,7 @@ Use fresh source: apply the patch once. `git apply --check` only checks applicab
 
 ## 4. Create the configuration
 
-The generation command below is for a new node. When reinstalling, back up the installed binaries, configuration and service/boot scripts, then copy `$PREFIX/etc/yggdrasil.conf` to `~/yggdrasil.conf` with mode600 instead of generating a new identity. Use fresh clone directories for a rebuild.
+The generation command below is for a new node. When reinstalling, back up the installed binaries, configuration and service/boot scripts, then copy `$PREFIX/etc/yggdrasil.conf` to `~/yggdrasil.conf` with mode 600 (`install -m 600 "$PREFIX/etc/yggdrasil.conf" "$HOME/yggdrasil.conf"`) instead of generating a new identity. Use fresh clone directories for a rebuild.
 
 ```sh
 ./yggdrasil -genconf > ~/yggdrasil.conf
@@ -123,13 +125,13 @@ AdminListen: unix:///data/data/com.termux/files/usr/tmp/yggdrasil.sock
 
 ## 5. Install binaries and configuration
 
-For an existing installation, stop the service before replacing its files:
+For an existing installation, first read [the service-profile migration procedure](docs/INSTALL.md#95-upgrading-an-existing-service-profile). Stop the service before replacing its files:
 
 ```sh
 sv -w 25 down yggdrasil
 ```
 
-Keep it stopped until the firewall is applied and the service is enabled below.
+If the stop command fails, do not replace files. Keep the service stopped until its scripts/logger are installed and it is enabled below; `run` applies the firewall before starting the daemon.
 
 ```sh
 install -m 755 ~/yggdrasil-go/yggdrasil "$PREFIX/bin/yggdrasil"
@@ -153,6 +155,8 @@ mkdir -p "$PREFIX/var/service/yggdrasil"
 touch "$PREFIX/var/service/yggdrasil/down"
 ```
 
+Create the complete 276-line v3 `run` (five sections: previous session, routing/firewall, daemon, helper ULAs, network events). Copy the whole block:
+
 Create `run`:
 
 ```sh
@@ -162,12 +166,19 @@ nano "$PREFIX/var/service/yggdrasil/run"
 ```sh
 #!/data/data/com.termux/files/usr/bin/sh
 # Yggdrasil uses ygg0; Android VpnService uses tunN.
+# One persistent root Bash session does everything, in this order:
+#   1. take over from a previous session left without its supervisor;
+#   2. route 200::/7 through table 200 and firewall inbound ygg0 traffic;
+#   3. run Yggdrasil and wait for its node address;
+#   4. keep helper ULAs so Android WebRTC gathers IPv6 call candidates
+#      on IPv4-only networks, driven by Netlink events without timers.
 # Merge stderr into stdout for runit service output.
 exec 2>&1
 
 # Run the following Bash block in one persistent root session.
 # Keep the outer shell waitable by runit; finish stops Yggdrasil.
 su -c 'exec /data/data/com.termux/files/usr/bin/bash -s' <<'YGG_ROOT' &
+P=/data/data/com.termux/files/usr
 children=()
 
 # Stop and reap all owned child processes when the root session exits.
@@ -179,18 +190,206 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' TERM INT HUP
 
-# Subscribe before taking the initial snapshot so startup events are queued.
-coproc NET_EVENTS { exec ip -o monitor link address route rule; }
+### 1. Previous session ##################################################
+
+# A process start time tells a live session apart from a reused PID.
+start_time() {
+    local stat
+    read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+    stat=(${stat##*) })
+    printf '%s\n' "${stat[19]}"
+}
+
+# Stop a root session left without its supervisor and wait for its cleanup.
+state=$P/var/run/yggdrasil-root
+if read -r old_pid old_start 2>/dev/null < "$state" &&
+   [[ $old_pid != "$$" && $(start_time "$old_pid") == "$old_start" ]]; then
+    kill "$old_pid" 2>/dev/null
+    for ((attempt=0; attempt<100; attempt++)); do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    # Never touch networking while the previous session is still alive.
+    [[ $(start_time "$old_pid") != "$old_start" ]] ||
+        { echo 'ERROR: Previous root session is still running'; exit 1; }
+fi
+printf '%s %s\n' "$$" "$(start_time "$$")" > "$state" || exit 1
+
+### 2. Routing and firewall ##############################################
+
+# Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
+# Remove duplicate copies first so exactly one rule remains.
+while ip -6 rule del to 200::/7 lookup 200 prio 1000 2>/dev/null; do :; done
+ip -6 rule add to 200::/7 lookup 200 prio 1000 || exit 1
+
+# Allow replies to connections initiated by the phone and related traffic.
+ip6tables -w -C INPUT -i ygg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null ||
+    ip6tables -w -A INPUT -i ygg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || exit 1
+# Drop packets that conntrack cannot classify as a valid connection state.
+ip6tables -w -C INPUT -i ygg0 -m conntrack --ctstate INVALID -j DROP 2>/dev/null ||
+    ip6tables -w -A INPUT -i ygg0 -m conntrack --ctstate INVALID -j DROP || exit 1
+# Drop all other inbound traffic arriving through the Yggdrasil interface.
+ip6tables -w -C INPUT -i ygg0 -j DROP 2>/dev/null ||
+    ip6tables -w -A INPUT -i ygg0 -j DROP || exit 1
+
+### 3. Yggdrasil #########################################################
+
+# Remove a stale ygg0 interface left by an unclean previous shutdown.
+ip link del ygg0 2>/dev/null || true
+
+# Prepare the standard /dev/net/tun path for the TUN interface.
+mkdir -p /dev/net && { [[ -e /dev/net/tun ]] || ln -s /dev/tun /dev/net/tun; } || exit 1
+
+# Start Yggdrasil with root privileges.
+$P/bin/yggdrasil -useconffile $P/etc/yggdrasil.conf &
+ygg_pid=$!
+children+=("$ygg_pid")
+
+# Wait up to 30 seconds for ygg0 and the node address on it.
+node=
+for ((attempt=0; attempt<30; attempt++)); do
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address == [23]??:*/7 ]] || continue
+        node=${address%/7}
+        break
+    done < <(ip -6 -o addr show dev ygg0 scope global 2>/dev/null)
+    [[ -n $node ]] && break
+    kill -0 "$ygg_pid" 2>/dev/null || exit 1
+    sleep 1
+done
+[[ -n $node ]] || { echo 'ERROR: ygg0 did not get its node address'; exit 1; }
+
+# Once ygg0 exists, route the Yggdrasil network through it in table 200.
+ip -6 route replace 200::/7 dev ygg0 metric 128 table 200 || exit 1
+
+### 4. Helper ULAs for WebRTC ############################################
+
+# These addresses are not public IPv6 connectivity or Yggdrasil identities.
+# Both keep the node's low 112 bits, so they never collide between phones.
+# The VPN and the physical uplink need different addresses: Android WebRTC
+# gathers no IPv6 candidates at all when one address is on two networks.
+ula_physical=fd42:${node#*:}/128
+ula_vpn=fd43:${node#*:}/128
+primary_dev=
+# owned[dev]="ifindex original_disable_ipv6" for each address we added.
+# changes[dev]="ifindex window_start count" limits additions per interface.
+declare -A owned=() changes=()
+
+# Succeed when the address list holds a global IPv6 address other than ours.
+has_foreign_ipv6() {
+    local index dev family address rest
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address != "$2" ]] && return 0
+    done <<< "$1"
+    return 1
+}
+
+# Remove our address and restore the interface's original IPv6 switch.
+release_ula() {
+    local dev=$1 ula=$ula_physical index original current addresses
+    [[ $dev == tun* ]] && ula=$ula_vpn
+    [[ -n ${owned[$dev]:-} ]] || return 0
+    read -r index original <<< "${owned[$dev]}"
+    unset 'owned[$dev]'
+    # A recreated interface no longer carries anything of ours.
+    read -r current 2>/dev/null < "/sys/class/net/$dev/ifindex" || return 0
+    [[ $current == "$index" ]] || return 0
+    ip -6 addr del "$ula" dev "$dev" 2>/dev/null && echo "[ULA] Removed $ula from $dev"
+    # Never disable IPv6 after the network acquires its own global address.
+    if [[ $original == 1 ]] &&
+       addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) &&
+       ! has_foreign_ipv6 "$addresses" "$ula"; then
+        printf '1\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"
+    fi
+}
+
+release_all() {
+    local dev
+    for dev in "${!owned[@]}"; do release_ula "$dev"; done
+}
+
+# Bring one interface in line with the policy: it carries our address only
+# while it is a real TUN VPN or the primary physical uplink, is UP, has a
+# global IPv4 address and has no global IPv6 address of its own.
+sync_ula() {
+    local dev=$1 ula=$ula_physical index flags tun_flags ipv4 addresses
+    local disabled window_index window count
+    [[ $dev =~ ^(tun|rmnet_data|wlan)[0-9]+$ ]] || return 0
+    if [[ $dev == tun* ]]; then
+        ula=$ula_vpn
+        # Skip TAP devices: a real TUN has bit 0 set in tun_flags.
+        read -r tun_flags 2>/dev/null < "/sys/class/net/$dev/tun_flags" || return 0
+        ((tun_flags & 1)) || return 0
+    elif [[ $dev != "$primary_dev" ]]; then
+        release_ula "$dev"; return 0
+    fi
+    { read -r index < "/sys/class/net/$dev/ifindex" &&
+      read -r flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || { release_ula "$dev"; return 0; }
+    # The kernel removed our address together with a recreated interface.
+    [[ ${owned[$dev]%% *} == "$index" ]] || unset 'owned[$dev]'
+    # A link going down releases the address and allows fresh attempts later.
+    if ((!(flags & 1))); then unset 'changes[$dev]'; release_ula "$dev"; return 0; fi
+    ipv4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null) || ipv4=
+    [[ -n $ipv4 ]] || { release_ula "$dev"; return 0; }
+    addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || return 0
+    if has_foreign_ipv6 "$addresses" "$ula"; then release_ula "$dev"; return 0; fi
+    # Leave the address unchanged when it is already present.
+    [[ $addresses == *"inet6 $ula "* ]] && return 0
+
+    read -r disabled < "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || return 0
+
+    # Allow four additions per interface in ten seconds, then wait for a later
+    # network event. This stops reset loops and repeated failures without a timer.
+    read -r window_index window count <<< "${changes[$dev]:-}"
+    if [[ $window_index != "$index" ]] || ((SECONDS - window >= 10)); then
+        window=$SECONDS count=0
+    fi
+    ((count < 4)) || {
+        ((count == 4)) && echo "[ULA] Too many changes on $dev; waiting for a later network event"
+        changes[$dev]="$index $window 5"; return 0
+    }
+    changes[$dev]="$index $window $((count + 1))"
+
+    # Remember the original IPv6 switch the first time we touch the interface.
+    [[ -n ${owned[$dev]:-} ]] || owned[$dev]="$index $disabled"
+    # The address is unique to this node and network type, so skip duplicate detection.
+    if { [[ $disabled == 0 ]] || printf '0\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"; } &&
+       ip -6 addr replace "$ula" dev "$dev" nodad; then
+        echo "[ULA] Added $ula to $dev"
+    else
+        echo "[ULA] Setup failed on $dev"
+        release_ula "$dev"
+    fi
+}
+
+# Find the primary physical uplink with the kernel route lookup used by
+# protected peer sockets (fwmark 0x20000). No packet is sent and no DNS is used.
+refresh_primary() {
+    local route previous=$primary_dev
+    route=$(ip -4 route get 1.1.1.1 mark 0x20000 2>/dev/null) || route=
+    primary_dev=
+    [[ $route =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]] && primary_dev=${BASH_REMATCH[1]}
+    [[ $primary_dev != "$previous" ]] || return 0
+    echo "[ULA] Primary uplink: ${primary_dev:-none}"
+    [[ -z $previous ]] || sync_ula "$previous"
+    [[ -z $primary_dev ]] || sync_ula "$primary_dev"
+}
+
+### 5. Network events ####################################################
+
+# Subscribe before taking the initial snapshot so no change is missed.
+coproc NET_EVENTS { exec ip -o monitor label link address route rule; }
 monitor_pid=$NET_EVENTS_PID
 children+=("$monitor_pid")
 # Duplicate the event stream so the background worker can read it.
 exec 3<&"${NET_EVENTS[0]}"
 
-# Wait up to five seconds for the Netlink subscription at startup only.
+# Wait up to five seconds until the monitor's own Netlink socket has subscribed.
 subscribed=0
 for ((attempt=0; attempt<100; attempt++)); do
-    while read -r socket protocol port groups rest; do
-        if [[ $protocol == 0 && $port == "$monitor_pid" && $groups != 00000000 ]]; then
+    sockets=$(ls -l "/proc/$monitor_pid/fd" 2>/dev/null)
+    while read -r socket protocol port groups rmem wmem dump locks drops inode rest; do
+        if [[ $protocol == 0 && $groups != 00000000 && $sockets == *"socket:[$inode]"* ]]; then
             subscribed=1; break
         fi
     done < /proc/net/netlink
@@ -200,160 +399,34 @@ for ((attempt=0; attempt<100; attempt++)); do
 done
 ((subscribed)) || { echo 'ERROR: Netlink subscription failed'; exit 1; }
 
-# Maintain one fixed ULA on UP TUN interfaces named tunN.
-# Derive the fixed address from this node and use it on physical interfaces too.
-# Add a local IPv6 path only to IPv4-only physical interfaces.
-# The same path now covers IPv4-only TUN interfaces as well.
-# These addresses are not public IPv6 connectivity or Yggdrasil identities.
-ula=
-primary_dev=
-declare -A ula_index=() ula_original=() ula_failed=()
-declare -A ula_window=() ula_updates=()
-
-init_ula() {
-    local index dev family address rest
-    while read -r index dev family address rest; do
-        [[ $family == inet6 && $address =~ ^[23][0-9a-f]{2}:.*/7$ ]] || continue
-        # Preserve canonical formatting and the node's low 112 bits; avoid LAN duplicates.
-        ula="fd42:${address#*:}"
-        ula="${ula%/7}/128"
-        return 0
-    done < <(ip -6 -o addr show dev ygg0 scope global)
-    return 1
-}
-
-other_ipv6() {
-    local index dev family address rest
-    while read -r index dev family address rest; do
-        [[ $family == inet6 && $address != "$ula" ]] && return 0
-    done <<< "$1"
-    return 1
-}
-
-release_ula() {
-    local dev=$1 current addresses ula=$ula
-    [[ $dev != tun* ]] || ula=fd42::1/128
-    [[ -n ${ula_index[$dev]:-} ]] || return 0
-    current=$(cat "/sys/class/net/$dev/ifindex" 2>/dev/null) || current=
-    if [[ $current == "${ula_index[$dev]}" ]]; then
-        ip -6 addr del "$ula" dev "$dev" 2>/dev/null || true
-        addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || addresses=
-        # Never disable IPv6 after the network acquires its own global address.
-        if [[ ${ula_original[$dev]} == 1 ]] && ! other_ipv6 "$addresses"; then
-            printf '1\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || true
-        fi
-    fi
-    unset 'ula_index[$dev]' 'ula_original[$dev]'
-}
-
-cleanup_ula() {
-    local dev
-    for dev in "${!ula_index[@]}"; do release_ula "$dev"; done
-}
-
-ensure_ula() {
-    local dev=$1 index flags ipv4 addresses disabled current tun_flags ula=$ula
-    [[ $dev != tun* ]] || ula=fd42::1/128
-    [[ -n $ula ]] || return 0
-    [[ $dev =~ ^(tun|rmnet_data|wlan)[0-9]+$ ]] || return 0
-    if [[ $dev == tun* ]]; then
-        read -r tun_flags < "/sys/class/net/$dev/tun_flags" 2>/dev/null || return 0
-        # Require TUN and UP; skip TAP and interfaces that are down.
-        ((tun_flags & 1)) || return 0
-    fi
-    [[ $dev == tun* || $dev == "$primary_dev" ]] || { release_ula "$dev"; return 0; }
-    { read -r index < "/sys/class/net/$dev/ifindex" &&
-      read -r flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || { release_ula "$dev"; return 0; }
-    if [[ ${ula_index[$dev]:-} != "$index" ]]; then
-        unset 'ula_index[$dev]' 'ula_original[$dev]'
-    fi
-    ipv4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null) || ipv4=
-    if (( !(flags & 1) )) || [[ -z $ipv4 ]]; then release_ula "$dev"; return 0; fi
-    addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || return 0
-    if other_ipv6 "$addresses"; then release_ula "$dev"; return 0; fi
-    # Leave the address unchanged when it is already present.
-    [[ $addresses == *"inet6 $ula "* ]] && return 0
-    [[ ${ula_failed[$dev]:-} != "$index" ]] || return 0
-    read -r disabled < "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || return 0
-    [[ $disabled == 0 || $disabled == 1 ]] || return 0
-
-    # Stop an address-reset feedback burst instead of spending CPU in a loop.
-    if [[ ${ula_window[$dev]:-} != "$index:"* ]] ||
-       (( SECONDS - ${ula_window[$dev]#*:} >= 10 )); then
-        ula_window[$dev]="$index:$SECONDS"
-        ula_updates[$dev]=0
-    fi
-    if (( ${ula_updates[$dev]:-0} >= 4 )); then
-        echo "[ULA] Repeated resets on $dev; waiting for a later network event"
-        return 0
-    fi
-    ula_updates[$dev]=$(( ${ula_updates[$dev]:-0} + 1 ))
-    if [[ -z ${ula_index[$dev]:-} ]]; then
-        ula_index[$dev]=$index
-        ula_original[$dev]=$disabled
-    fi
-    current=$(cat "/sys/class/net/$dev/ifindex" 2>/dev/null) || current=
-    [[ $current == "$index" ]] || { release_ula "$dev"; return 0; }
-    if { [[ $disabled == 0 ]] || printf '0\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"; } &&
-       ip -6 addr replace "$ula" dev "$dev"; then
-        echo "[ULA] Added $ula to $dev"
-    else
-        release_ula "$dev"
-        ula_failed[$dev]=$index
-        echo "[ULA] Setup failed on $dev; waiting for interface recreation"
-    fi
-}
-
-refresh_primary() {
-    local route previous=$primary_dev
-    primary_dev=
-    route=$(ip -4 route get 1.1.1.1 mark 0x20000 2>/dev/null) || route=
-    [[ $route =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]] && primary_dev=${BASH_REMATCH[1]}
-    [[ $primary_dev != "$previous" ]] || return 0
-    [[ -z $previous ]] || ensure_ula "$previous"
-    [[ -z $primary_dev ]] || ensure_ula "$primary_dev"
-}
-
-# Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
-ip -6 rule add to 200::/7 lookup 200 prio 1000 2>/dev/null || true
-
-# Remove a stale ygg0 interface left by an unclean previous shutdown.
-ip link del ygg0 2>/dev/null || true
-
-# Prepare the standard /dev/net/tun path for the TUN interface.
-mkdir -p /dev/net && ln -sf /dev/tun /dev/net/tun || exit 1
-
-# Start Yggdrasil with root privileges.
-/data/data/com.termux/files/usr/bin/yggdrasil -useconffile /data/data/com.termux/files/usr/etc/yggdrasil.conf &
-ygg_pid=$!
-children+=("$ygg_pid")
-
-# Wait up to 30 seconds for ygg0 to appear.
-for ((attempt=0; attempt<30; attempt++)); do
-    ip link show ygg0 >/dev/null 2>&1 &&
-        ip -6 -o addr show dev ygg0 scope global 2>/dev/null | grep -q '/7 ' && break
-    kill -0 "$ygg_pid" 2>/dev/null || exit 1
-    sleep 1
-done
-# Once ygg0 exists, route the Yggdrasil network through it in table 200.
-ip -6 route replace 200::/7 dev ygg0 metric 128 table 200 || exit 1
-
 # Check existing interfaces once, then handle events without a timer.
 (
-    trap cleanup_ula EXIT
+    trap release_all EXIT
     trap 'exit 0' TERM INT HUP
-    init_ula || { echo 'ERROR: Native Yggdrasil address is unavailable'; exit 1; }
     refresh_primary
-    for path in /sys/class/net/tun[0-9]* /sys/class/net/rmnet_data[0-9]* /sys/class/net/wlan[0-9]*; do ensure_ula "${path##*/}"; done
+    for path in /sys/class/net/{tun,rmnet_data,wlan}[0-9]*; do sync_ula "${path##*/}"; done
+    declare -A pending=()
     while IFS= read -r event <&3; do
-        # Extract the interface name, including from address deletion events.
-        read -r index dev rest <<< "${event#Deleted }"
-        if [[ $index =~ ^[0-9]+:$ && $dev != from ]]; then
-            dev=${dev%:}; dev=${dev%%@*}
-            ensure_ula "$dev"
-        else
-            refresh_primary
-        fi
+        # Collect events that are already queued and handle the batch once:
+        # link and address events name an interface, route and rule events
+        # may change the primary uplink.
+        refresh=0
+        while :; do
+            case $event in
+                '[LINK]'*|'[ADDR]'*)
+                    event=${event#\[*\]}
+                    read -r index dev rest <<< "${event#Deleted }"
+                    dev=${dev%:}; dev=${dev%%@*}
+                    [[ $index =~ ^[0-9]+:$ && -n $dev ]] && pending[$dev]=1
+                    ;;
+                *) refresh=1 ;;
+            esac
+            read -t 0 -u 3 || break
+            IFS= read -r event <&3 || break
+        done
+        ((refresh)) && refresh_primary
+        for dev in "${!pending[@]}"; do sync_ula "$dev"; done
+        pending=()
     done
     exit 1
 ) &
@@ -398,70 +471,89 @@ chmod +x "$PREFIX/var/service/yggdrasil/run" "$PREFIX/var/service/yggdrasil/fini
 
 ### 6.1 IPv4-only VPN and physical Internet compatibility
 
-One handler maintains `fd42::1/128` on eligible IPv4-only TUN interfaces and a node-derived ULA on the current IPv4-only physical Internet interface. Existing IPv6 is preserved; IMS and hotspot downstream interfaces are excluded. Link/address/route/rule events handle interface recreation and uplink changes, without a separate switching service or polling timer.
+The VPN helper is `fd43:<node low 112 bits>/128`; the primary physical helper is `fd42:<same bits>/128`. Both are key-derived, and must be different: controlled A/B calls with one identical address on both networks produced zero IPv6 candidates and ICE FAILED. Different-address control calls connected. The internal mechanism remains a hypothesis.
 
-After connecting a VPN, find its interface:
+Only UP real TUNs named `tunN` and the marked primary `rmnet_dataN`/`wlanN` with global-scope IPv4 and no other global-scope IPv6 are eligible. Existing IPv6 is preserved; an owned helper is removed when the network gains its own global IPv6. IMS/hotspot exclusion follows primary-uplink selection, not semantic network detection.
+
+After starting the service and connecting the VPN, identify the actual interfaces:
 
 ```sh
 su -c 'ip -br addr'
-```
-
-For a matching interface such as `tun0`, check:
-
-```sh
-su -c 'ip -6 -o addr show dev tun0'
-```
-
-For an IPv4-only VPN without another global-scope IPv6 address, expect `fd42::1/128`. Reconnect and check the current interface again. For an IPv4-only physical Internet network, use the marked route lookup below and inspect its returned `dev`; expect `fd42:` followed by the native Yggdrasil address's remaining seven groups, with `/128`.
-
-```sh
 su -c 'ip -4 route get 1.1.1.1 mark 0x20000'
+su -c 'ip -6 -o addr show dev tun0 scope global'
 ```
 
-The lookup sends no packet. A dual-stack network needs no added ULA. A hotspot's `wlanN` is not an Internet uplink merely because its name matches.
+The route lookup sends no packet. Replace `tun0` with the actual VPN name and inspect the returned physical `dev` too. A helper is local compatibility, not general IPv6 Internet access. Yggdrasil destinations still use rule `1000` and `ygg0`.
 
-The ULA is a local compatibility address, not general IPv6 Internet access. Yggdrasil destinations continue to use rule `1000` and `ygg0`.
+Netlink batches deduplicate named interfaces and refresh the primary at most once per route/rule batch; four additions per interface per ten seconds (including failures) limit reset loops. There is no periodic timer. The root session records PID/start time and waits up to ten seconds for its predecessor's cleanup before touching networking. Use runit rather than launching simultaneous copies of `run`.
 
-A new call with the final handler passed on an IPv4-only mobile APN with AmneziaWG: ICE connected in about 0.44 seconds and bidirectional media used native Yggdrasil addresses. Earlier VPN-switching and reboot tests used the previous handler. This script does not manage mid-call ICE recovery; verify your own network/VPN combination.
+v3 passed mobile/Amnezia calls, Wi-Fi with native IPv6, and calls after mobile ↔ Wi-Fi transitions. Reboot, `sv restart` and orphan takeover results were recorded on v2 with the same boot/firewall/takeover logic; v3 has not itself passed a reboot test. See the [full matrix and limits](docs/INSTALL.md#evidence-and-limits); continuous mid-call handover is not established.
 
-See [installation guide section 10.3](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) for the reproduced problem, implementation, test results and limits.
+### 6.2 Service logs
+
+Create the logger and its output directory before enabling the service:
+
+```sh
+mkdir -p "$PREFIX/var/service/yggdrasil/log" "$PREFIX/var/log/sv/yggdrasil" "$PREFIX/var/run"
+chmod 700 "$PREFIX/var/log/sv/yggdrasil"
+nano "$PREFIX/var/service/yggdrasil/log/run"
+```
+
+Contents of `log/run` (the standard Termux services logger; `LOGDIR` is supplied by `termux-services`):
+
+```sh
+#!/data/data/com.termux/files/usr/bin/sh
+# Get the name of the service from the PWD, this assumes the name of the
+# service is one level above the log directory.
+pwd=${PWD%/*} # $SVDIR/service/foo/log
+service=${pwd##*/} # foo
+
+mkdir -p "$LOGDIR/sv/$service"
+
+exec svlogd -tt "$LOGDIR/sv/$service"
+```
+
+Create `$PREFIX/var/log/sv/yggdrasil/config`:
+
+```sh
+nano "$PREFIX/var/log/sv/yggdrasil/config"
+```
+
+Contents:
+
+```text
+s262144
+n4
+```
+
+Make the logger executable:
+
+```sh
+chmod +x "$PREFIX/var/service/yggdrasil/log/run"
+```
+
+`s262144` rotates at 262,144 bytes (256 KiB); `n4` retains four rotated files **plus** `current`, approximately 1.25 MiB of log data in normal operation. These are rotation thresholds, not a strict disk quota. See the [svlogd manual](https://smarden.org/runit/svlogd.8).
+
+Yggdrasil stdout/stderr and the helper's `[ULA] Primary uplink`, `Added`, `Removed`, `Setup failed` and `Too many changes` messages go to the same timestamped log:
+
+```sh
+tail -n 100 "$PREFIX/var/log/sv/yggdrasil/current"
+tail -F "$PREFIX/var/log/sv/yggdrasil/current"
+```
+
+Stop following with Ctrl-C. Logs contain network/node addresses; redact them before sharing. An old `current` file alone does not prove the logger is running: check `sv status "$PREFIX/var/service/yggdrasil/log"` and fresh timestamps.
 
 ## 7. Configure the firewall
+
+The complete `run` above already installs the three stateful INPUT rules with `-w -C || -w -A` before starting Yggdrasil: allow ESTABLISHED/RELATED, drop INVALID, drop other inbound `ygg0` traffic. No separate boot firewall script is needed. On upgrade, `~/.termux/boot/05-ygg-firewall.sh` can be removed; leaving the old idempotent script is harmless.
+
+After service startup, inspect `su -c '/system/bin/ip6tables -S INPUT'`. Check full rule order; never flush Android's tables. [Firewall checks and untested AFWall+ custom-script integration](docs/INSTALL.md#11-firewall).
+
+## 8. Configure Termux:Boot
 
 ```sh
 mkdir -p "$HOME/.termux/boot"
 ```
-
-Create:
-
-```sh
-nano "$HOME/.termux/boot/05-ygg-firewall.sh"
-```
-
-```sh
-#!/data/data/com.termux/files/usr/bin/sh
-
-# Allow replies to connections initiated by the phone and related traffic.
-su -c '/system/bin/ip6tables -C INPUT -i ygg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || /system/bin/ip6tables -A INPUT -i ygg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
-
-# Drop packets that conntrack cannot classify as a valid connection state.
-su -c '/system/bin/ip6tables -C INPUT -i ygg0 -m conntrack --ctstate INVALID -j DROP 2>/dev/null || /system/bin/ip6tables -A INPUT -i ygg0 -m conntrack --ctstate INVALID -j DROP'
-
-# Drop all other inbound traffic arriving through the Yggdrasil interface.
-su -c '/system/bin/ip6tables -C INPUT -i ygg0 -j DROP 2>/dev/null || /system/bin/ip6tables -A INPUT -i ygg0 -j DROP'
-```
-
-```sh
-chmod +x "$HOME/.termux/boot/05-ygg-firewall.sh"
-```
-
-Apply it immediately:
-
-```sh
-"$HOME/.termux/boot/05-ygg-firewall.sh"
-```
-
-## 8. Configure Termux:Boot
 
 Create:
 
@@ -480,14 +572,14 @@ termux-wake-lock
 chmod +x "$HOME/.termux/boot/10-services.sh"
 ```
 
-The firewall script can also be executed manually from Termux to apply its rules to the current boot; see the [manual command and checks](docs/INSTALL.md#11-firewall). Opening Termux or starting the supervisor does not run that script; Termux:Boot supplies the automatic boot trigger. [Details](docs/INSTALL.md#123-manual-execution-and-shell-startup).
+This is the only required boot script. It takes a persistent Termux wake lock and starts runit. Opening Termux can also start the supervisor, and v3 applies the firewall on that path too. [Login and boot behavior](docs/INSTALL.md#123-manual-execution-and-shell-startup).
 
 ## 9. Start and enable Yggdrasil
 
-Start `termux-services` in the current Android session:
+Start the supervisor with the same wake-lock policy as boot:
 
 ```sh
-. /data/data/com.termux/files/usr/etc/profile.d/start-services.sh
+"$HOME/.termux/boot/10-services.sh"
 ```
 
 After creating or recreating the service directory, wait for its supervisor endpoint and enable Yggdrasil:
@@ -553,13 +645,9 @@ sv restart yggdrasil
 
 ## 11. Reboot
 
-Reboot Android normally.
+Termux:Boot runs `10-services.sh`; runit starts Yggdrasil, and `run` applies the firewall first. To prove automatic startup, compare the supervisor/daemon start times with the **first login shell** immediately after reboot, before manually starting services. A login itself can start runit, so a running service after opening Termux is insufficient. Use the [read-only comparison command and checklist](docs/INSTALL.md#16-verify-everything-after-reboot).
 
-Termux:Boot will restore the firewall and start `termux-services`; `runit` will then start Yggdrasil automatically.
-
-After reboot, follow [installation guide section 16](docs/INSTALL.md#16-verify-everything-after-reboot), including the patched version, physical peer socket marks and ULA checks. A clean reinstall and Android reboot passed with the earlier published direct profile; they were not repeated with this new ULA handler. Verify the installed profile after reboot.
-
-A separate QUIC-only reboot with `0.5.14-direct.3` passed on 2026-10-10: Termux:Boot started the daemon and both peers automatically, with direct physical traffic, restored firewall/routing and the same node identity. The temporary QUIC test config was then replaced with the original TCP peers and Wi-Fi multicast. See [QUIC checks and call-test limits](DIRECT-TRANSPORT.md#quic-handover-calls-and-reboot).
+The recorded v2 reboot started the supervisor and daemon at uptime ~23 s, before the first login at ~104 s. v3 shares the boot/firewall logic, but **v3 itself has not passed a reboot test**. Earlier `direct.3` QUIC reboot evidence belongs to an older service profile. [Current matrix](docs/INSTALL.md#evidence-and-limits).
 
 ## 12. Updating Yggdrasil
 

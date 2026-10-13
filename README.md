@@ -1,10 +1,10 @@
 # Yggdrasil on rooted Android via Termux
 
-Native Yggdrasil node with a real `ygg0` interface, policy routing, runit supervision and a stateful IPv6 firewall. Root is required.
+Native Yggdrasil with a real `ygg0` interface, policy routing, runit supervision and a stateful IPv6 firewall. Root is required.
 
 **[Quick setup](QUICKSTART.md) · [Full installation guide](docs/INSTALL.md)**
 
-You are viewing the **`ultimate`** branch. It combines direct TCP-based/QUIC peer transport with one event-driven IPv6 compatibility handler for IPv4-only VPNs and physical Internet networks. Android chooses the uplink; the handler excludes IMS and hotspot downstream interfaces. [Compatibility and checks](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) · [Transport details](DIRECT-TRANSPORT.md).
+The **`ultimate` v3 profile** combines marked outgoing TCP-based/QUIC peer sockets outside the Android VPN with an event-driven WebRTC compatibility handler. It derives different local helpers from the node identity: `fd42:` on the primary IPv4-only physical uplink and `fd43:` on eligible IPv4-only VPN TUNs. Existing global-scope IPv6 is preserved. Android chooses the uplink; other applications retain their VPN policy. [Compatibility and verification matrix](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) · [Transport details](DIRECT-TRANSPORT.md).
 
 > **Tested with Yggdrasil v0.5.14 on LineageOS 23 (Android 16).**
 >
@@ -14,78 +14,35 @@ You are viewing the **`ultimate`** branch. It combines direct TCP-based/QUIC pee
 
 1. Configure working root access through `su -c`.
 2. Install **Termux and the separate Termux:Boot Android app** from matching signing sources.
-3. **Open Termux:Boot once through its launcher icon.** This enables its boot receiver; opening the Termux terminal is a different action.
+3. **Open Termux:Boot once through its launcher icon** to activate its boot receiver.
 
-Then follow the [quick setup](QUICKSTART.md) or the [full guide](docs/INSTALL.md). They create both boot scripts and enable the Yggdrasil service. Termux:Boot is an Android app, not a package installed with `pkg`. [Official usage instructions](https://github.com/termux/termux-boot#how-to-use).
+The guides install one boot script, `10-services.sh`, and enable Yggdrasil. Termux:Boot is an Android app, not a `pkg` package. [Official usage instructions](https://github.com/termux/termux-boot#how-to-use).
 
-## Architecture
-
-The final setup looks like this:
+## Service and autostart
 
 ```text
-Android boot
-│
-└── Termux:Boot
-    │
-    ├── 05-ygg-firewall.sh
-    │   └── restores the IPv6 INPUT policy for ygg0
-    │
-    └── 10-services.sh
-        ├── termux-wake-lock
-        └── starts termux-services / runit
-            │
-            └── yggdrasil
-                │
-                ├── run
-                │   ├── starts one persistent root Bash session
-                │   ├── subscribes to link/address/route/rule events
-                │   ├── adds RPDB rule 1000
-                │   ├── removes stale ygg0
-                │   ├── prepares /dev/net/tun
-                │   ├── starts Yggdrasil and waits for ygg0
-                │   ├── installs 200::/7 in table 200
-                │   ├── maintains ULA on eligible VPN and Internet interfaces
-                │   └── supervises Yggdrasil, monitor and event worker
-                │
-                └── finish
-                    ├── stops Yggdrasil
-                    ├── removes ygg0
-                    └── removes RPDB rule 1000
+Termux:Boot → 10-services.sh → wake lock + runit
+    → run: previous-session takeover → routing/firewall → Yggdrasil
+        → batched VPN/physical ULA handler + bounded svlogd logs
+    → finish: stop daemon and remove interface/rule
 ```
 
-The important separation is:
+`run` applies the firewall before each daemon start, including login-triggered starts. No separate firewall boot script is needed. It records the root-session PID/start time and waits for a surviving predecessor's cleanup before touching networking. [Lifecycle](docs/INSTALL.md#94-previous-session-takeover) · [Firewall and AFWall+](docs/INSTALL.md#11-firewall).
 
-```text
-Termux:Boot = one-shot boot initialization
-runit       = long-running service supervision
-```
+Android 12+ child-process restrictions can kill the Termux supervisor while root Yggdrasil continues running. Supervision returns on the next Termux login or reboot; until then a failed daemon cannot be restarted. Disabling phantom-process monitoring is optional and affects all apps. The boot script's persistent wake lock also has a battery cost. [Background restrictions](docs/INSTALL.md#31-optional-android-child-process-restrictions) · [Power policy](docs/INSTALL.md#124-wake-lock-and-battery-cost).
 
-Termux:Boot does not replace `runit`. It only starts the supervisor after Android boots.
-
-## Autostart and the firewall
-
-After installation, Termux:Boot runs `05-ygg-firewall.sh` and then `10-services.sh` from `~/.termux/boot/`. The first applies the firewall; the second starts the runit supervisor. With the app activated, both scripts installed and the service enabled, opening Termux after every reboot is unnecessary.
-
-The firewall script is an ordinary shell script and can also be run manually from Termux; its commands request root through `su`:
-
-```sh
-"$HOME/.termux/boot/05-ygg-firewall.sh"
-```
-
-Opening a Termux login shell can start the service supervisor through `start-services.sh`, but it does not execute the files in `~/.termux/boot/` or apply this firewall. If Termux:Boot is omitted, another boot trigger must explicitly run the scripts; running them manually only applies them to the current boot. [Autostart details](docs/INSTALL.md#12-autostart-with-termuxboot) · [Firewall setup and checks](docs/INSTALL.md#11-firewall).
+v3 passed calls on IPv4-only mobile data with Amnezia and calls after mobile ↔ Wi-Fi transitions. Reboot was verified on v2 with the same boot/firewall logic; **v3 itself has not passed a reboot test**. Opening Termux can start runit, so prove boot autostart by comparing service start times with the first login. [Reboot verification](docs/INSTALL.md#16-verify-everything-after-reboot).
 
 ## Branches
 
-Use the installation guide and QUICKSTART from the same branch.
+Use installation instructions from the same branch as the chosen profile.
 
 | Branch | Profile |
 | --- | --- |
 | [main](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/main) | Upstream Yggdrasil, routing, firewall and runit |
 | [webrtc-vpn-compat](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/webrtc-vpn-compat) | Adds the event-driven VPN ULA handler |
 | [direct-vpn-bypass](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass) | Adds marked outgoing TCP-based and QUIC peer sockets outside the VPN |
-| [ultimate](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/ultimate) | Combines direct peer transport and one ULA handler for IPv4-only VPN/Internet networks |
-
-The [full guide](docs/INSTALL.md) contains prerequisites, installation, Wi-Fi multicast, verification, service management, updates and removal.
+| [ultimate](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/ultimate) | v3: direct peers, distinct key-derived VPN/physical ULAs, root-session takeover, firewall in run, batched events and bounded logs |
 
 ## License
 
