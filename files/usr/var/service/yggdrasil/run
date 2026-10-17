@@ -1,0 +1,107 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Yggdrasil uses ygg0; Android VpnService uses tunN.
+# run owns the root session and Yggdrasil; firewall owns inbound ygg0 rules;
+# ula keeps helper addresses for Android WebRTC on IPv4-only networks.
+# One persistent root Bash session does the following, in this order:
+#   1. take over from a previous session left without its supervisor;
+#   2. route 200::/7 through table 200 and call firewall;
+#   3. run Yggdrasil and wait for its node address;
+#   4. start ula, driven by Netlink events without timers;
+#   5. wait for Yggdrasil or ula to stop, then clean up both.
+# Merge stderr into stdout for runit service output.
+exec 2>&1
+
+# Run the following Bash block in one persistent root session.
+# Keep the outer shell waitable by runit; finish stops Yggdrasil.
+su -c 'exec /data/data/com.termux/files/usr/bin/bash -s' <<'YGG_ROOT' &
+P=/data/data/com.termux/files/usr
+D=$P/var/service/yggdrasil
+children=()
+
+# Stop and reap all owned child processes when the root session exits.
+cleanup() {
+    trap - EXIT
+    ((${#children[@]})) && kill "${children[@]}" 2>/dev/null
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+
+### 1. Previous session ##################################################
+
+# A process start time tells a live session apart from a reused PID.
+start_time() {
+    local stat
+    read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+    stat=(${stat##*) })
+    printf '%s\n' "${stat[19]}"
+}
+
+# Stop a root session left without its supervisor and wait for its cleanup.
+state=$P/var/run/yggdrasil-root
+if read -r old_pid old_start 2>/dev/null < "$state" &&
+   [[ $old_pid != "$$" && $(start_time "$old_pid") == "$old_start" ]]; then
+    kill "$old_pid" 2>/dev/null
+    for ((attempt=0; attempt<100; attempt++)); do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    # Never touch networking while the previous session is still alive.
+    [[ $(start_time "$old_pid") != "$old_start" ]] ||
+        { echo 'ERROR: Previous root session is still running'; exit 1; }
+fi
+printf '%s %s\n' "$$" "$(start_time "$$")" > "$state" || exit 1
+
+### 2. Routing ###########################################################
+
+# Send all traffic destined for the Yggdrasil 200::/7 network to routing table 200.
+# Remove duplicate copies first so exactly one rule remains.
+while ip -6 rule del to 200::/7 lookup 200 prio 1000 2>/dev/null; do :; done
+ip -6 rule add to 200::/7 lookup 200 prio 1000 || exit 1
+
+# Accept inbound ygg0 traffic only from trusted addresses (see firewall).
+"$D/firewall" || exit 1
+
+### 3. Yggdrasil #########################################################
+
+# Remove a stale ygg0 interface left by an unclean previous shutdown.
+ip link del ygg0 2>/dev/null || true
+
+# Prepare the standard /dev/net/tun path for the TUN interface.
+mkdir -p /dev/net && { [[ -e /dev/net/tun ]] || ln -s /dev/tun /dev/net/tun; } || exit 1
+
+# Start Yggdrasil with root privileges.
+$P/bin/yggdrasil -useconffile $P/etc/yggdrasil.conf &
+ygg_pid=$!
+children+=("$ygg_pid")
+
+# Wait up to 30 seconds for ygg0 and the node address on it.
+node=
+for ((attempt=0; attempt<30; attempt++)); do
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address == [23]??:*/7 ]] || continue
+        node=${address%/7}
+        break
+    done < <(ip -6 -o addr show dev ygg0 scope global 2>/dev/null)
+    [[ -n $node ]] && break
+    kill -0 "$ygg_pid" 2>/dev/null || exit 1
+    sleep 1
+done
+[[ -n $node ]] || { echo 'ERROR: ygg0 did not get its node address'; exit 1; }
+
+# Once ygg0 exists, route the Yggdrasil network through it in table 200.
+ip -6 route replace 200::/7 dev ygg0 metric 128 table 200 || exit 1
+
+### 4. Helper ULAs #######################################################
+
+# Keep helper addresses for WebRTC calls (see ula).
+"$D/ula" "$node" &
+ula_pid=$!
+children+=("$ula_pid")
+
+# Exit and clean up if Yggdrasil or the helper stops.
+# An enabled runit service can then restart the complete run script.
+wait -n "$ygg_pid" "$ula_pid"
+YGG_ROOT
+# Keep the run script alive for as long as the Yggdrasil process is running.
+wait "$!"

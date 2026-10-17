@@ -1,0 +1,49 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Reload the trusted list without restarting Yggdrasil.
+# Inbound ygg0 traffic: replies to our connections and traffic from addresses
+# listed in $PREFIX/etc/yggdrasil-trusted pass; everything else is dropped.
+# Safe to run again: replace our whole chain in one transaction, with no
+# gap that would leave inbound ygg0 traffic open. Leave other chains alone.
+D=/data/data/com.termux/files/usr/var/service/yggdrasil
+if ((EUID != 0)); then
+    exec su -c "exec /data/data/com.termux/files/usr/bin/bash '$D/firewall'"
+fi
+
+trusted_file=/data/data/com.termux/files/usr/etc/yggdrasil-trusted
+trusted=()
+line_number=0
+if [[ -f $trusted_file ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+        ((line_number+=1))
+        line=${line%$'\r'}
+        read -r address _ <<< "$line"
+        [[ -z $address || $address == \#* ]] && continue
+        [[ $address == */* ]] || address+=/128
+        # Accept only the Yggdrasil range 200::/7; ip rejects malformed
+        # addresses, so one typo cannot make the whole list fail to load.
+        # A prefix shorter than /7 would also cover addresses outside it.
+        if [[ ! $address =~ ^[23][0-9a-fA-F]{2}:.*/([0-9]+)$ ]] ||
+           ((10#${BASH_REMATCH[1]} < 7)) ||
+           ! ip -6 addr show to "$address" >/dev/null 2>&1; then
+            echo "[Firewall] Ignored line $line_number: $line"
+            continue
+        fi
+        trusted+=("$address")
+    done < "$trusted_file"
+fi
+
+# --noflush is required: without it restore would erase Android's filter
+# table. This chain declaration creates or clears only our own YGG_IN.
+{
+    printf '*filter\n:YGG_IN - [0:0]\n'
+    printf '%s\n' '-A YGG_IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
+    printf '%s\n' '-A YGG_IN -m conntrack --ctstate INVALID -j DROP'
+    for address in "${trusted[@]}"; do
+        printf '%s\n' "-A YGG_IN -s $address -j ACCEPT"
+    done
+    printf '%s\n' '-A YGG_IN -j DROP' 'COMMIT'
+} | ip6tables-restore --noflush --wait=10 || exit 1
+
+ip6tables -w -C INPUT -i ygg0 -j YGG_IN 2>/dev/null ||
+    ip6tables -w -A INPUT -i ygg0 -j YGG_IN || exit 1
+echo "[Firewall] Inbound ygg0 traffic allowed from ${#trusted[@]} trusted address(es)"

@@ -1,0 +1,30 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Stop the root session started by run. Its cleanup stops Yggdrasil and ula,
+# which removes the helper addresses. This also works while run is still
+# starting, before Yggdrasil exists.
+su -c 'exec /data/data/com.termux/files/usr/bin/bash -s' <<'YGG_ROOT'
+P=/data/data/com.termux/files/usr
+
+# The process start time tells the live session apart from a reused PID.
+start_time() {
+    local stat
+    read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+    stat=(${stat##*) })
+    printf '%s\n' "${stat[19]}"
+}
+if read -r pid start 2>/dev/null < "$P/var/run/yggdrasil-root" &&
+   [[ $(start_time "$pid") == "$start" ]]; then
+    kill "$pid" 2>/dev/null
+    for ((attempt=0; attempt<100; attempt++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+fi
+
+# Fallbacks for a session that was killed before its own cleanup.
+pkill -f '[y]ggdrasil -useconffile /data/data/com.termux/files/usr/etc/yggdrasil.conf' 2>/dev/null
+ip link del ygg0 2>/dev/null
+# Remove the policy rule that sends the Yggdrasil network to routing table 200.
+ip -6 rule del to 200::/7 lookup 200 prio 1000 2>/dev/null
+YGG_ROOT
+exit 0

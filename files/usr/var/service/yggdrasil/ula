@@ -1,0 +1,200 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Keep helper ULAs for Android WebRTC, using the node address from run.
+[[ $# == 1 && $1 =~ ^[23][0-9a-fA-F]{2}:[0-9a-fA-F:]*$ ]] ||
+    { echo 'ERROR: Expected one Yggdrasil node address without /7'; exit 1; }
+node=$1
+children=()
+
+# Stop and reap all owned child processes when this helper exits.
+cleanup() {
+    trap - EXIT
+    ((${#children[@]})) && kill "${children[@]}" 2>/dev/null
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+
+### 1. Helper ULAs for WebRTC ############################################
+
+# These addresses are not public IPv6 connectivity or Yggdrasil identities.
+# Both keep the node's low 112 bits, so they never collide between phones.
+# The VPN and the physical uplink need different addresses: Android WebRTC
+# gathers no IPv6 candidates at all when one address is on two networks.
+ula_physical=fd42:${node#*:}/128
+ula_vpn=fd43:${node#*:}/128
+primary_dev=
+# owned[dev]="ifindex original_disable_ipv6" for each address we added.
+# changes[dev]="ifindex window_start count" limits additions per interface.
+declare -A owned=() changes=()
+
+# Succeed when the address list holds a global IPv6 address other than ours.
+has_foreign_ipv6() {
+    local index dev family address rest
+    while read -r index dev family address rest; do
+        [[ $family == inet6 && $address != "$2" ]] && return 0
+    done <<< "$1"
+    return 1
+}
+
+# Remove our address and restore the interface's original IPv6 switch.
+release_ula() {
+    local dev=$1 ula=$ula_physical index original current addresses
+    [[ $dev == tun* ]] && ula=$ula_vpn
+    [[ -n ${owned[$dev]:-} ]] || return 0
+    read -r index original <<< "${owned[$dev]}"
+    unset 'owned[$dev]'
+    # A recreated interface no longer carries anything of ours.
+    read -r current 2>/dev/null < "/sys/class/net/$dev/ifindex" || return 0
+    [[ $current == "$index" ]] || return 0
+    ip -6 addr del "$ula" dev "$dev" 2>/dev/null && echo "[ULA] Removed $ula from $dev"
+    # Never disable IPv6 after the network acquires its own global address.
+    if [[ $original == 1 ]] &&
+       addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) &&
+       ! has_foreign_ipv6 "$addresses" "$ula"; then
+        printf '1\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"
+    fi
+}
+
+release_all() {
+    local dev
+    for dev in "${!owned[@]}"; do release_ula "$dev"; done
+}
+
+# Bring one interface in line with the policy: it carries our address only
+# while it is a real TUN VPN or the primary physical uplink, is UP, has a
+# global IPv4 address and has no global IPv6 address of its own.
+sync_ula() {
+    local dev=$1 ula=$ula_physical index flags tun_flags ipv4 addresses
+    local disabled window_index window count
+    [[ $dev =~ ^(tun|rmnet_data|wlan)[0-9]+$ ]] || return 0
+    if [[ $dev == tun* ]]; then
+        ula=$ula_vpn
+        # Skip TAP devices: a real TUN has bit 0 set in tun_flags.
+        read -r tun_flags 2>/dev/null < "/sys/class/net/$dev/tun_flags" || return 0
+        ((tun_flags & 1)) || return 0
+    elif [[ $dev != "$primary_dev" ]]; then
+        release_ula "$dev"; return 0
+    fi
+    { read -r index < "/sys/class/net/$dev/ifindex" &&
+      read -r flags < "/sys/class/net/$dev/flags"; } 2>/dev/null || { release_ula "$dev"; return 0; }
+    # The kernel removed our address together with a recreated interface.
+    [[ ${owned[$dev]%% *} == "$index" ]] || unset 'owned[$dev]'
+    # A link going down releases the address and allows fresh attempts later.
+    if ((!(flags & 1))); then unset 'changes[$dev]'; release_ula "$dev"; return 0; fi
+    ipv4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null) || ipv4=
+    [[ -n $ipv4 ]] || { release_ula "$dev"; return 0; }
+    addresses=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null) || return 0
+    if has_foreign_ipv6 "$addresses" "$ula"; then release_ula "$dev"; return 0; fi
+    # Leave the address unchanged when it is already present.
+    [[ $addresses == *"inet6 $ula "* ]] && return 0
+
+    read -r disabled < "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" || return 0
+
+    # Allow four additions per interface in ten seconds, then wait for a later
+    # network event. This stops reset loops and repeated failures without a timer.
+    read -r window_index window count <<< "${changes[$dev]:-}"
+    if [[ $window_index != "$index" ]] || ((SECONDS - window >= 10)); then
+        window=$SECONDS count=0
+    fi
+    ((count < 4)) || {
+        ((count == 4)) && echo "[ULA] Too many changes on $dev; waiting for a later network event"
+        changes[$dev]="$index $window 5"; return 0
+    }
+    changes[$dev]="$index $window $((count + 1))"
+
+    # Remember the original IPv6 switch the first time we touch the interface.
+    [[ -n ${owned[$dev]:-} ]] || owned[$dev]="$index $disabled"
+    # The address is unique to this node and network type, so skip duplicate detection.
+    if { [[ $disabled == 0 ]] || printf '0\n' > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"; } &&
+       ip -6 addr replace "$ula" dev "$dev" nodad; then
+        echo "[ULA] Added $ula to $dev"
+    else
+        echo "[ULA] Setup failed on $dev"
+        release_ula "$dev"
+    fi
+}
+
+# Find the primary physical uplink with the kernel route lookup used by
+# protected peer sockets (fwmark 0x20000). No packet is sent and no DNS is used.
+refresh_primary() {
+    local route previous=$primary_dev
+    route=$(ip -4 route get 1.1.1.1 mark 0x20000 2>/dev/null) || route=
+    primary_dev=
+    [[ $route =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]] && primary_dev=${BASH_REMATCH[1]}
+    [[ $primary_dev != "$previous" ]] || return 0
+    echo "[ULA] Primary uplink: ${primary_dev:-none}"
+    [[ -z $previous ]] || sync_ula "$previous"
+    [[ -z $primary_dev ]] || sync_ula "$primary_dev"
+}
+
+# Start from a clean state: remove our addresses left by a session that was
+# killed before it could clean up. Interfaces keep their current IPv6 switch.
+while read -r index dev family address rest; do
+    [[ $address == "$ula_physical" || $address == "$ula_vpn" ]] || continue
+    ip -6 addr del "$address" dev "${dev%%@*}" && echo "[ULA] Removed stale $address from $dev"
+done < <(ip -6 -o addr show scope global 2>/dev/null)
+
+### 2. Network events ####################################################
+
+# Subscribe before taking the initial snapshot so no change is missed.
+coproc NET_EVENTS { exec ip -o monitor label link address route rule; }
+monitor_pid=$NET_EVENTS_PID
+children+=("$monitor_pid")
+# Duplicate the event stream so the background worker can read it.
+exec 3<&"${NET_EVENTS[0]}"
+
+# Wait up to five seconds until the monitor's own Netlink socket has subscribed.
+subscribed=0
+for ((attempt=0; attempt<100; attempt++)); do
+    sockets=$(ls -l "/proc/$monitor_pid/fd" 2>/dev/null)
+    while read -r socket protocol port groups rmem wmem dump locks drops inode rest; do
+        if [[ $protocol == 0 && $groups != 00000000 && $sockets == *"socket:[$inode]"* ]]; then
+            subscribed=1; break
+        fi
+    done < /proc/net/netlink
+    ((subscribed)) && break
+    kill -0 "$monitor_pid" 2>/dev/null || break
+    sleep 0.05
+done
+((subscribed)) || { echo 'ERROR: Netlink subscription failed'; exit 1; }
+
+# Check existing interfaces once, then handle events without a timer.
+(
+    # Ignore further stop signals so removing our addresses always completes.
+    trap 'trap "" TERM INT HUP; release_all' EXIT
+    trap 'exit 0' TERM INT HUP
+    refresh_primary
+    for path in /sys/class/net/{tun,rmnet_data,wlan}[0-9]*; do sync_ula "${path##*/}"; done
+    declare -A pending=()
+    while read -r event <&3; do
+        # Collect events that are already queued and handle the batch once:
+        # link and address events name an interface, route and rule events
+        # may change the primary uplink.
+        refresh=0
+        while :; do
+            case $event in
+                '[LINK]'*|'[ADDR]'*)
+                    event=${event#\[*\]}
+                    read -r index dev rest <<< "${event#Deleted }"
+                    dev=${dev%:}; dev=${dev%%@*}
+                    [[ $index =~ ^[0-9]+:$ && -n $dev ]] && pending[$dev]=1
+                    ;;
+                *) refresh=1 ;;
+            esac
+            read -t 0 -u 3 || break
+            read -r event <&3 || break
+        done
+        ((refresh)) && refresh_primary
+        for dev in "${!pending[@]}"; do sync_ula "$dev"; done
+        pending=()
+    done
+    exit 1
+) &
+worker_pid=$!
+children+=("$worker_pid")
+exec 3<&-
+
+# Exit and clean up if the monitor or the worker stops.
+# run will then stop Yggdrasil so runit can restart the service.
+wait -n "$monitor_pid" "$worker_pid"
+exit 1

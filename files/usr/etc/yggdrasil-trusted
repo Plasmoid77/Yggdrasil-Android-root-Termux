@@ -1,0 +1,3 @@
+# One Yggdrasil address or prefix (200::/7) per line, then an optional note.
+# Blank lines and lines starting with # are ignored. No prefix means /128.
+# 200:1234:5678:9abc:def0:1234:5678:9abc laptop
