@@ -33,11 +33,13 @@ These are documentation addresses, not working peers or devices. Choose peers fr
 
 ## 3. Options
 
-- `--peer URI`: public peer; repeat for each. Replaces the configured peers. Without it, peers are kept, and a new node connects only to Wi-Fi multicast neighbours until you add public peers.
+- `--peer URI`: public peer with a `tcp`, `tls`, `quic`, `ws`, `wss`, `socks` or `sockstls` scheme; repeat for each. Replaces the configured peers. Without it, peers are kept, and a new node connects only to Wi-Fi multicast neighbours until you add public peers.
 - `--trusted ADDR`: Yggdrasil address or prefix within `200::/7` allowed to connect to this phone; repeat for each. Replaces the trusted list. Without it, the list is kept.
-- `--private-key-file FILE`: use an existing node identity. `FILE` holds only the 128-character hex private key. The environment variable `YGG_PRIVATE_KEY` may hold it instead; the key is never accepted on the command line. Without either, the configured key is kept and a new node gets a new key.
+- `--private-key-file FILE`: use an existing node identity. `FILE` holds only the 128-character hex private key; an empty file is an error. The environment variable `YGG_PRIVATE_KEY` may hold it instead; the key is never accepted on the command line. Without either, the configured key is kept and a new node gets a new key.
 - `--rebuild`: build again even when version `0.5.14-direct.3` is installed.
 - `--help`: show usage.
+
+An invalid peer, address or key stops the installer before any Yggdrasil file changes.
 
 On a fresh install, keep a private copy of `$PREFIX/etc/yggdrasil.conf`: it contains the node's private key and is not in any installer backup.
 
@@ -55,7 +57,7 @@ The installer uses `files/` and `patches/` beside `install.sh`. It writes under 
 
 1. **Checks.** Require a non-root Termux user, working `su` and a clone containing `files/` and `patches/`. Warn about Termux:Boot and a nonstandard `$PREFIX`; the service scripts use standard Termux paths.
 2. **Packages.** Install only missing tools, including `root-repo`; no full upgrade.
-3. **Binaries.** Skip the build if `0.5.14-direct.3` and an executable `yggdrasilctl` are installed, unless `--rebuild` is given. Otherwise clone v0.5.14, verify commit `422836eeb21a99790caa286aa63d493bbc4766d7`, apply the patch and build with `GOFLAGS=-p=2` to reduce parallel processes under Android's limit. Check the resulting version.
+3. **Binaries.** Skip the build if `0.5.14-direct.3` and an executable `yggdrasilctl` are installed, unless `--rebuild` is given. Otherwise fetch the v0.5.14 tag, verify commit `422836eeb21a99790caa286aa63d493bbc4766d7`, apply the patch and build with `GOFLAGS=-p=2` to reduce parallel processes under Android's limit. Check the resulting version.
 4. **Configuration.** Never print `yggdrasil.conf` or copy it into a backup. In an existing file, apply only `--peer` and `--private-key-file` with `jq`, keeping every other field. For a new node, generate JSON (valid HJSON) with `ygg0`, the admin socket, `--peer` values, the given key or a new one, no listening endpoints and Wi-Fi multicast. Require `IfName: ygg0`; warn about `AdminListen`. Build the trusted list from `--trusted`.
 5. **Supervisor.** Start runit if needed with a wake lock and `start-services.sh`, without running the user's boot script.
 6. **Install files.** Publish a new service directory atomically with `down` and `log/` already inside. If any code differs (binaries, `run`, `finish`, `ula`, `firewall`, `log/run`), first create `down` and stop the service with `sv -w 45 down`. Back up replaced files to `~/yggdrasil-backup-<time>/`, then replace each by atomic rename, `run` last. Create config, trusted list, log settings and `10-services.sh` only when missing. Replace the config only when requested, with the service stopped, after saving the old file as `yggdrasil.conf.previous`. Replace the trusted list only when `--trusted` is given.
