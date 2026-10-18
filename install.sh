@@ -14,17 +14,52 @@ root() {
     su -c "exec $command"
 }
 
+usage() {
+    cat <<'USAGE'
+Usage: bash install.sh [options]
+
+  --peer URI              Public peer. Repeatable. Replaces the peers in the
+                          configuration; without any, they are kept.
+  --trusted ADDR          Yggdrasil address or prefix (200::/7) allowed to
+                          connect to this phone. Repeatable. Replaces the
+                          trusted list; without any, it is kept.
+  --private-key-file FILE Use the node identity in FILE: 128 hex characters
+                          and nothing else. YGG_PRIVATE_KEY may hold it
+                          instead; it is never accepted as an argument value.
+                          Without either, the configured key is kept and a
+                          new node gets a new key.
+  --rebuild               Build again even when this version is installed.
+  --help                  Show this help.
+
+A changed configuration is saved first as yggdrasil.conf.previous.
+USAGE
+}
+
 say '1/8 Checks'
-peers=() rebuild=0
+peers=() trusted=() key_file= rebuild=0
 while (($#)); do
     case $1 in
         --peer) (($# >= 2)) && [[ $2 == *://?* && $2 != -* ]] || die '--peer needs a URI'
             peers+=("$2"); shift 2 ;;
+        --trusted) (($# >= 2)) && [[ $2 =~ ^[23][0-9a-fA-F]{2}:[0-9a-fA-F:]*(/([0-9]{1,3}))?$ ]] &&
+            ((10#${BASH_REMATCH[2]:-128} >= 7 && 10#${BASH_REMATCH[2]:-128} <= 128)) ||
+                die '--trusted needs a Yggdrasil address or prefix within 200::/7'
+            trusted+=("$2"); shift 2 ;;
+        --private-key-file) (($# >= 2)) && [[ -n $2 && $2 != -* ]] || die '--private-key-file needs a file'
+            key_file=$2; shift 2 ;;
         --rebuild) rebuild=1; shift ;;
-        --help|-h) say 'Usage: bash install.sh [--peer URI]... [--rebuild]'; exit 0 ;;
+        --help|-h) usage; exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
 done
+# The key never reaches a command line: /proc/<pid>/cmdline is world readable.
+key=${YGG_PRIVATE_KEY:-}
+unset YGG_PRIVATE_KEY
+if [[ -n $key_file ]]; then
+    [[ -f $key_file && -r $key_file ]] || die "Cannot read $key_file"
+    key=$(tr -d ' \t\r\n' < "$key_file")
+fi
+[[ -z $key || $key =~ ^[0-9a-fA-F]{128}$ ]] || die 'The private key must be 128 hex characters.'
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ -d $source_dir/files && -f $source_dir/patches/android-peer-vpn-bypass.patch ]] ||
     die 'Missing files or patch; run install.sh from a clone of the ultimate branch.'
@@ -58,7 +93,7 @@ done
 say '3/8 Binaries'
 mkdir -p -- "$HOME/.cache/yggdrasil-ultimate"
 stage=$(mktemp -d "$HOME/.cache/yggdrasil-ultimate/install.XXXXXXXX")
-temporary= backup= stopped=0 code_changed=0 new_service=0
+temporary= backup= stopped=0 code_changed=0 settings_changed=0 new_service=0 new_config=0
 cleanup() {
     local result=$?
     trap - EXIT
@@ -84,7 +119,7 @@ binary=$PREFIX/bin/yggdrasil
 control=$PREFIX/bin/yggdrasilctl
 if ((rebuild)) || [[ ! -x $control ]] ||
    ! "$binary" -version 2>/dev/null | grep -qx 'Build version: 0.5.14-direct.3'; then
-    git clone --depth 1 --branch v0.5.14 https://github.com/yggdrasil-network/yggdrasil-go.git "$stage/yggdrasil-go"
+    git -c advice.detachedHead=false clone -q --depth 1 --branch v0.5.14 https://github.com/yggdrasil-network/yggdrasil-go.git "$stage/yggdrasil-go"
     [[ $(git -C "$stage/yggdrasil-go" rev-parse HEAD) == 422836eeb21a99790caa286aa63d493bbc4766d7 ]] ||
         die 'Unexpected v0.5.14 commit; installed files were not changed.'
     (
@@ -104,17 +139,34 @@ fi
 
 say '4/8 Configuration'
 candidate=$config
+peer_json=$(jq -cn --args '$ARGS.positional' "${peers[@]}")
 if [[ -e $config ]]; then
-    ((${#peers[@]} == 0)) || say 'WARNING: Existing config kept; --peer did not change its peers.'
     grep -Fq -- "$endpoint" "$config" || say "WARNING: AdminListen differs from $endpoint; control commands may fail."
+    if ((${#peers[@]})) || [[ -n $key ]]; then
+        # Rewrite as JSON (valid HJSON); comments in the old file are dropped.
+        candidate=$stage/yggdrasil.conf
+        "$binary" -useconffile "$config" -normaliseconf -json 2>/dev/null |
+            YGG_KEY=$key jq --argjson peers "$peer_json" --argjson set_peers "${#peers[@]}" '
+                if $set_peers > 0 then .Peers = $peers else . end |
+                if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' > "$candidate" ||
+            die 'Cannot read the existing config; it was not changed.'
+        # Same settings in another layout: keep the file and the running service.
+        if cmp -s <(jq -S . "$candidate") <("$binary" -useconffile "$config" -normaliseconf -json 2>/dev/null | jq -S .); then
+            candidate=$config
+        fi
+    fi
 else
     candidate=$stage/yggdrasil.conf
-    peer_json=$(jq -cn --args '$ARGS.positional' "${peers[@]}")
     "$binary" -genconf -json 2>/dev/null |
-        jq --arg endpoint "$endpoint" --argjson peers "$peer_json" '
+        YGG_KEY=$key jq --arg endpoint "$endpoint" --argjson peers "$peer_json" '
             .IfName = "ygg0" | .AdminListen = $endpoint | .Peers = $peers |
             .Listen = [] | .MulticastInterfaces = [
-                {Regex:"^wlan[0-9]+$", Beacon:true, Listen:true, Port:0, Priority:0}]' > "$candidate" || die 'Config generation failed.'
+                {Regex:"^wlan[0-9]+$", Beacon:true, Listen:true, Port:0, Priority:0}] |
+            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' > "$candidate" || die 'Config generation failed.'
+fi
+if ((${#trusted[@]})); then
+    printf '%s\n' '# One Yggdrasil address or prefix (200::/7) per line, then an optional note.' \
+        "${trusted[@]}" > "$stage/yggdrasil-trusted"
 fi
 # Parser diagnostics may contain key material, so extract only these fields.
 ifname=$("$binary" -useconffile "$candidate" -normaliseconf -json 2>/dev/null |
@@ -154,17 +206,19 @@ put_file() {
     mv -f -- "$temporary" "$2"
     temporary=
 }
+stop_service() {
+    ((new_service || stopped)) && return 0
+    local created_down=0
+    if [[ ! -e $service/down ]]; then touch -- "$service/down"; created_down=1; fi
+    if ! sv -w 45 down yggdrasil; then
+        ((created_down == 0)) || rm -f -- "$service/down"
+        die 'Could not stop the service; no code replaced. Re-run the installer after fixing supervision.'
+    fi
+    stopped=1
+}
 put_code() {
     cmp -s -- "$1" "$2" && return 0
-    if ((!new_service && !stopped)); then
-        local created_down=0
-        if [[ ! -e $service/down ]]; then touch -- "$service/down"; created_down=1; fi
-        if ! sv -w 45 down yggdrasil; then
-            ((created_down == 0)) || rm -f -- "$service/down"
-            die 'Could not stop the service; no code replaced. Re-run the installer after fixing supervision.'
-        fi
-        stopped=1
-    fi
+    stop_service
     if [[ -f $2 ]]; then
         make_backup
         local saved=$backup/usr/${2#"$PREFIX"/}
@@ -173,6 +227,20 @@ put_code() {
     fi
     put_file "$@"
     code_changed=1
+}
+# Requested settings replace existing ones; the previous config stays beside
+# the new one (it holds the key), never in the backup.
+put_config() {
+    cmp -s -- "$1" "$config" && return 0
+    stop_service
+    put_file "$config" "$config.previous" 600
+    put_file "$1" "$config" 600
+    settings_changed=1
+}
+put_trusted() {
+    cmp -s -- "$1" "$PREFIX/etc/yggdrasil-trusted" && return 0
+    put_file "$1" "$PREFIX/etc/yggdrasil-trusted" 600
+    settings_changed=1
 }
 put_setting() {
     if [[ -e $2 ]]; then
@@ -202,11 +270,20 @@ put_code "$stage/files/usr/var/service/yggdrasil/ula" "$service/ula" 700
 put_code "$stage/files/usr/var/service/yggdrasil/finish" "$service/finish" 700
 put_code "$stage/files/usr/var/service/yggdrasil/log/run" "$service/log/run" 700
 put_code "$stage/files/usr/var/service/yggdrasil/run" "$service/run" 700
-put_setting "$candidate" "$config" 600
-put_setting "$stage/files/usr/etc/yggdrasil-trusted" "$PREFIX/etc/yggdrasil-trusted" 600
+if [[ ! -e $config ]]; then
+    put_setting "$candidate" "$config" 600
+    new_config=1
+elif [[ $candidate != "$config" ]]; then
+    put_config "$candidate"
+fi
+if [[ -f $stage/yggdrasil-trusted ]]; then
+    put_trusted "$stage/yggdrasil-trusted"
+else
+    put_setting "$stage/files/usr/etc/yggdrasil-trusted" "$PREFIX/etc/yggdrasil-trusted" 600
+fi
 put_setting "$stage/files/usr/var/log/sv/yggdrasil/config" "$PREFIX/var/log/sv/yggdrasil/config" 600
 put_setting "$stage/files/home/.termux/boot/10-services.sh" "$boot/10-services.sh" 700
-if [[ $candidate != "$config" ]]; then
+if ((new_config)); then
     say "NOTE: The node identity (private key) is in $config. Keep a private copy; it is not in the installer backup."
 fi
 
@@ -245,7 +322,7 @@ done
 up=$(root -c 'exec "$1/bin/timeout" 10 "$1/bin/yggdrasilctl" "-endpoint=$2" -json getPeers' \
     ygg-installer "$PREFIX" "$endpoint" 2>/dev/null |
     jq -er '[.peers[] | select(.up == true)] | length') || up=unavailable
-say "Node: $node; peers up: $up; code changed: $code_changed"
+say "Node: $node; peers up: $up; code changed: $code_changed; settings changed: $settings_changed"
 say "Backup (replaced code files only; no node config): ${backup:-none}"
 say "Trusted devices: edit $PREFIX/etc/yggdrasil-trusted; run $service/firewall"
 say "Peers: edit $config; then sv restart yggdrasil"
