@@ -143,15 +143,16 @@ peer_json=$(jq -cn --args '$ARGS.positional' "${peers[@]}")
 if [[ -e $config ]]; then
     grep -Fq -- "$endpoint" "$config" || say "WARNING: AdminListen differs from $endpoint; control commands may fail."
     if ((${#peers[@]})) || [[ -n $key ]]; then
-        # Rewrite as JSON (valid HJSON); comments in the old file are dropped.
+        # Edit JSON directly: -normaliseconf drops fields such as AdminListen.
+        jq -e 'type == "object"' "$config" >/dev/null 2>&1 ||
+            die "$config is not JSON (HJSON?); edit Peers or PrivateKey there by hand. Nothing was changed."
         candidate=$stage/yggdrasil.conf
-        "$binary" -useconffile "$config" -normaliseconf -json 2>/dev/null |
-            YGG_KEY=$key jq --argjson peers "$peer_json" --argjson set_peers "${#peers[@]}" '
-                if $set_peers > 0 then .Peers = $peers else . end |
-                if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' > "$candidate" ||
+        YGG_KEY=$key jq --argjson peers "$peer_json" --argjson set_peers "${#peers[@]}" '
+            if $set_peers > 0 then .Peers = $peers else . end |
+            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' "$config" > "$candidate" 2>/dev/null ||
             die 'Cannot read the existing config; it was not changed.'
         # Same settings in another layout: keep the file and the running service.
-        if cmp -s <(jq -S . "$candidate") <("$binary" -useconffile "$config" -normaliseconf -json 2>/dev/null | jq -S .); then
+        if cmp -s <(jq -S . "$candidate") <(jq -S . "$config"); then
             candidate=$config
         fi
     fi

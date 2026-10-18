@@ -35,17 +35,23 @@ git clone --depth 1 --branch ultimate https://github.com/Plasmoid77/Yggdrasil-An
 bash ~/yggdrasil-android-guide/install.sh
 ```
 
-Run as the normal Termux user. Repeat `--peer URI` to set peers for a **new** configuration; replace the example URIs with current public peers:
+Run as the normal Termux user. Options can be combined; replace the example values with current public peers and your own devices:
 
 ```sh
-bash ~/yggdrasil-android-guide/install.sh --peer tcp://192.0.2.10:12345 --peer quic://192.0.2.20:12345
+bash ~/yggdrasil-android-guide/install.sh --peer tcp://192.0.2.10:12345 --peer quic://192.0.2.20:12345 --trusted 200:1234:5678:9abc:def0:1234:5678:9abc
 ```
 
-These are documentation addresses, not working peers. Without `--peer`, a new node connects only to Wi-Fi multicast neighbours until you add public peers. Existing configurations and their peers are kept; `--peer` does not edit them. Use `--rebuild` to build again even when version `0.5.14-direct.3` is already installed. `--help` shows usage.
+These are documentation addresses, not working peers or devices.
 
-**Code is replaced; settings are created only when missing.** The installer backs up only files it replaces under `~/yggdrasil-backup-<time>/` (mode 700), mirroring `usr/`. It never copies `yggdrasil.conf` into this backup. Existing settings are kept; missing settings are created. No backup is made when nothing is replaced.
+- `--peer URI`: public peer; repeat for each. Replaces the configured peers. Without it, peers are kept, and a new node connects only to Wi-Fi multicast neighbours until you add public peers.
+- `--trusted ADDR`: Yggdrasil address or prefix within `200::/7` allowed to connect to this phone; repeat for each. Replaces the trusted list. Without it, the list is kept.
+- `--private-key-file FILE`: use an existing node identity. `FILE` holds only the 128-character hex private key. The environment variable `YGG_PRIVATE_KEY` may hold it instead; the key is never accepted on the command line. Without either, the configured key is kept and a new node gets a new key.
+- `--rebuild`: build again even when version `0.5.14-direct.3` is installed.
+- `--help`: show usage.
 
-It is safe to run the installer again: unchanged files are left alone, changed code files are replaced with the service stopped first and started again, and settings are never overwritten. Each run reloads `YGG_IN`, resetting packet counters.
+**Code is replaced; settings change only when requested.** The installer backs up only code files it replaces under `~/yggdrasil-backup-<time>/` (mode 700), mirroring `usr/`. It never copies `yggdrasil.conf` into this backup. When `--peer` or `--private-key-file` changes the configuration, the previous file stays beside it as `yggdrasil.conf.previous` (mode 600; it holds the previous key) and Yggdrasil restarts. These two options edit only a JSON configuration, as the installer creates; for other formats it stops without changes. Missing settings are created. No backup is made when nothing is replaced.
+
+It is safe to run the installer again: unchanged files are left alone, changed code files are replaced with the service stopped first and started again, and settings change only through the options above. Each run reloads `YGG_IN`, resetting packet counters.
 
 On a fresh install, keep a private copy of `yggdrasil.conf`: it contains the node's private key.
 

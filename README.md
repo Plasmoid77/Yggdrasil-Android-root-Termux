@@ -27,7 +27,7 @@ git clone --depth 1 --branch ultimate https://github.com/Plasmoid77/Yggdrasil-An
 bash ~/yggdrasil-android-guide/install.sh
 ```
 
-Optional `--peer URI` sets peers for a new node; `--rebuild` forces a build. Existing settings are kept. [Automatic installation and manual steps](QUICKSTART.md#automatic-installation).
+Options: `--peer URI` and `--trusted ADDR` (repeatable; each replaces its list), `--private-key-file FILE` (keep a node identity), `--rebuild` (build again). Other settings are kept. [Automatic installation and manual steps](QUICKSTART.md#automatic-installation).
 
 ## Service and autostart
 
