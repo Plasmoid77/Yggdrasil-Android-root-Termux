@@ -24,7 +24,7 @@ su -c "$PREFIX/bin/ss -ulnep"
 
 Outgoing public-peer sockets should carry `0x20000`. TCP shows the physical source address. An unconnected QUIC UDP socket may show a wildcard source. Use a bounded capture to the chosen peer to confirm traffic uses the physical interface. Check application connectivity and that applications requiring the VPN still use it. A route lookup or an `up` peer alone does not prove the traffic path.
 
-See [transport verification](docs/INSTALL.md#104-direct-peer-transport) and [post-reboot checks](docs/INSTALL.md#163-direct-transport-and-vpn-compatibility). Calls, Wi-Fi ↔ mobile handover and reboot have not yet been verified with these service files.
+See [transport verification](docs/INSTALL.md#104-direct-peer-transport) and [post-reboot checks](docs/INSTALL.md#163-direct-transport-and-vpn-compatibility). Calls, Wi-Fi ↔ mobile handover and reboot were verified with these service files.
 
 ## Updating to another upstream release
 

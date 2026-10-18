@@ -229,7 +229,7 @@ The handler groups Netlink events into batches. It checks each named interface o
 
 The root session records its PID/start time. It waits up to ten seconds for the previous session to clean up before changing networking. Use runit. Do not launch simultaneous copies of `run`.
 
-The `ula` helper removes this node's stale helpers at startup and completes address cleanup before exiting. Calls, Wi-Fi ↔ mobile handover and reboot have not yet been verified with these files. See [checks and limits](docs/INSTALL.md#evidence-and-limits).
+The `ula` helper removes this node's stale helpers at startup and completes address cleanup before exiting. Calls, Wi-Fi ↔ mobile handover and reboot were verified with these files. See [checks and limits](docs/INSTALL.md#evidence-and-limits).
 
 ### 6.2 Service logs
 
@@ -389,7 +389,7 @@ Termux:Boot runs `10-services.sh`. Runit starts Yggdrasil, and `run` applies the
 
 To prove boot startup, compare supervisor/daemon start times with the **first login shell**. Do this immediately after reboot, before manually starting services. Login can start runit, so finding a running service after opening Termux is not enough. Use the [read-only comparison command and checklist](docs/INSTALL.md#16-verify-everything-after-reboot).
 
-Reboot has not yet been verified with these files. Trusted/untrusted firewall and bidirectional Syncthing checks do not prove boot startup. [Checks and limits](docs/INSTALL.md#evidence-and-limits).
+Reboot was verified with these files: Termux:Boot started the service before login. [Checks and limits](docs/INSTALL.md#evidence-and-limits).
 
 ## 12. Updating Yggdrasil
 

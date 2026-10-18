@@ -1273,7 +1273,7 @@ with no `999` rule.
 
 The `ula` file handles two IPv4-only cases: an Android VPN and the phone's physical Internet network. The peer socket patch handles transport. The ULA handler handles IPv6 compatibility for applications. Yggdrasil itself can carry its IPv6 overlay over IPv4 peers.
 
-On IPv4-only Internet/VPN networks, Android WebRTC may need a non-link-local IPv6 address on the relevant interface to gather IPv6 ICE candidates. The helper supplies that address. It does not provide general IPv6 Internet access. Calls have not yet been verified with these files.
+On IPv4-only Internet/VPN networks, Android WebRTC may need a non-link-local IPv6 address on the relevant interface to gather IPv6 ICE candidates. The helper supplies that address. It does not provide general IPv6 Internet access. Calls on Wi-Fi and mobile data were verified with these files.
 
 #### Addresses and interface selection
 
@@ -1885,7 +1885,7 @@ BOOT_CHECK
 
 Both `runsvdir` and Yggdrasil must start **earlier than the first login shell**. Divide ticks by `CLK_TCK` to get seconds since boot.
 
-Reboot has not yet been verified with these files. Use this comparison to check whether Termux:Boot started the service before login.
+Reboot was verified with these files. Use this comparison to check whether Termux:Boot started the service before login.
 
 The command matches executable paths in command lines because Android can truncate process names. Inspect names and arguments with `ps -eo pid,ppid,args`. If your shell uses another login convention, find the first login PID there. Read its stat with the same method.
 
@@ -2515,7 +2515,7 @@ The main differences are:
 - stateful `ip6tables` protection on `ygg0`;
 - trusted-source `YGG_IN` chain applied by `firewall`, called from `run` before every daemon start;
 - no custom `dnsmasq`;
-- reboot checks compare boot startup with login startup; reboot remains unverified with these files;
+- reboot checks compare boot startup with login startup; reboot was verified with these files;
 - tested inbound and outbound packet-flow behavior.
 
 ---
