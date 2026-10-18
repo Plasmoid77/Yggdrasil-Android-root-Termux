@@ -235,8 +235,6 @@ These are documentation addresses, not working peers or devices.
 
 It is safe to run the installer again: unchanged files are left alone, changed code files are replaced with the service stopped first and started again, and settings change only through the options above. Each run reloads `YGG_IN`, resetting packet counters.
 
-The installer was tested in a fake environment. It has **not yet run on a clean phone**.
-
 The installer uses `files/` and `patches/` beside `install.sh`. It writes under the current `$PREFIX` and `$HOME`. The installed service files use the standard Termux paths shown in section 9.
 
 It follows these steps:
@@ -1382,9 +1380,13 @@ Repeat after a VPN reconnect and a Wi-Fi/mobile transition without restarting Yg
 These checks use exactly these files on the author's rooted LineageOS 23 / Android 16 phone with Yggdrasil 0.5.14-direct.3:
 
 - **Verified:** trusted-device ping/TCP; untrusted sources dropped in `YGG_IN` counters; Syncthing over Yggdrasil in both directions; service start/stop.
-- **Not yet verified:** calls; Wi-Fi ↔ mobile handover; reboot; AFWall+ enabled; the installer on a clean phone.
+- **Calls:** WebRTC audio calls (Monocles) with sound on Wi-Fi and on mobile data; captures on `ygg0` showed the media on direct Yggdrasil paths, sometimes through a TURN relay over Yggdrasil while ICE settled.
+- **Wi-Fi ↔ mobile handover:** in both directions, the helper address moved to the new network, peers reconnected over the physical network within seconds, and calls connected afterwards.
+- **Reboot:** Termux:Boot started the service; the node address, rule 1000, table 200, helper addresses, one `YGG_IN` jump, trusted list and peers were restored.
+- **AFWall+:** enabled in blacklist mode, then whitelist mode with root, Termux, the VPN app and the call app allowed. Non-AFWall+ rules and `YGG_IN` stayed unchanged, peers stayed connected and a call worked.
+- **Installer:** a clean installation from `git clone` on the phone, then repeat runs with `--trusted`, `--private-key-file` and `--peer`.
 
-The installer was tested in a fake environment. Lifecycle and firewall logic also passed stub tests. These checks do not establish call, handover or boot behavior. Kernel addresses alone do not prove Android `LinkProperties` or ICE candidates. Check other ROMs, network names, VPNs and application versions separately.
+Lifecycle and firewall logic also passed stub tests. Kernel addresses alone do not prove Android `LinkProperties` or ICE candidates. Check other ROMs, network names, VPNs and application versions separately.
 
 ### 10.4 Direct peer transport
 

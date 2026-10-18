@@ -55,7 +55,7 @@ It is safe to run the installer again: unchanged files are left alone, changed c
 
 On a fresh install, keep a private copy of `yggdrasil.conf`: it contains the node's private key.
 
-The installer was tested in a fake environment. It has **not yet run on a clean phone**. [Installer steps](docs/INSTALL.md#automatic-installation).
+The installer was tested with a clean installation on the author's phone. [Installer steps](docs/INSTALL.md#automatic-installation).
 
 Continue below only for manual installation.
 

@@ -45,7 +45,7 @@ Termux:Boot → 10-services.sh → wake lock + runit
 
 Android 12+ can kill the Termux supervisor while root Yggdrasil keeps running. Login or reboot restores supervision. Until then, a failed daemon cannot restart. Disabling phantom-process monitoring is optional and affects all apps. The boot script holds a wake lock, which costs battery power. [Background restrictions](docs/INSTALL.md#31-optional-android-child-process-restrictions) · [Power policy](docs/INSTALL.md#124-wake-lock-and-battery-cost).
 
-Verified with these files on the author's phone: trusted-device ping/TCP, dropped untrusted sources, Syncthing over Yggdrasil in both directions, and service start/stop. Not yet verified with these files: calls, Wi-Fi ↔ mobile handover, reboot, AFWall+ enabled, and the installer on a clean phone. The installer was tested in a fake environment. [Checks and limits](docs/INSTALL.md#evidence-and-limits).
+Verified with these files on the author's phone: trusted-device ping/TCP, dropped untrusted sources, Syncthing over Yggdrasil in both directions, service start/stop, calls on Wi-Fi and mobile data, Wi-Fi ↔ mobile handover, reboot, AFWall+ enabled, and the installer on a clean phone. [Checks and limits](docs/INSTALL.md#evidence-and-limits).
 
 ## License
 
