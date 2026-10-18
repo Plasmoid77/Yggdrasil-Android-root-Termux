@@ -155,30 +155,46 @@ fi
 say '4/8 Configuration'
 candidate=$config
 peer_json=$(jq -cn --args '$ARGS.positional' "${peers[@]}")
+# Write Yggdrasil's default format, commented HJSON. -normaliseconf always
+# drops AdminListen, so add it back, then check the file parses to $1.
+write_hjson() { # $1 = settings as JSON, $2 = new config file
+    "$binary" -useconf -normaliseconf < "$1" > "$2.body" 2>/dev/null &&
+        [[ $(tail -n 1 -- "$2.body") == '}' ]] || return 1
+    {
+        sed '$d' -- "$2.body"
+        printf '\n  # Admin socket for yggdrasilctl and the service scripts.\n  AdminListen: "%s"\n}\n' "$endpoint"
+    } > "$2"
+    rm -f -- "$2.body"
+    # -genconf -json has "NodeInfo": null, which HJSON writes as {}.
+    cmp -s <("$binary" -useconf -normaliseconf -json < "$1" 2>/dev/null | jq -S '.NodeInfo //= {}') \
+        <("$binary" -useconffile "$2" -normaliseconf -json 2>/dev/null | jq -S '.NodeInfo //= {}') &&
+        grep -Fqx -- "  AdminListen: \"$endpoint\"" "$2"
+}
 if [[ -e $config ]]; then
     grep -Fq -- "$endpoint" "$config" || say "WARNING: AdminListen differs from $endpoint; control commands may fail."
     if ((${#peers[@]})) || [[ -n $key ]]; then
-        # Edit JSON directly: -normaliseconf drops fields such as AdminListen.
-        jq -e 'type == "object"' "$config" >/dev/null 2>&1 ||
-            die "$config is not JSON (HJSON?); edit Peers or PrivateKey there by hand. Nothing was changed."
-        candidate=$stage/yggdrasil.conf
+        grep -Fq -- "$endpoint" "$config" ||
+            die "AdminListen is not $endpoint; edit Peers or PrivateKey in $config by hand. Nothing was changed."
+        "$binary" -useconffile "$config" -normaliseconf -json > "$stage/current.json" 2>/dev/null ||
+            die 'Cannot read the existing config; it was not changed.'
         YGG_KEY=$key jq --argjson peers "$peer_json" --argjson set_peers "${#peers[@]}" '
             if $set_peers > 0 then .Peers = $peers else . end |
-            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' "$config" > "$candidate" 2>/dev/null ||
-            die 'Cannot read the existing config; it was not changed.'
-        # Same settings in another layout: keep the file and the running service.
-        if cmp -s <(jq -S . "$candidate") <(jq -S . "$config"); then
-            candidate=$config
+            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' \
+            "$stage/current.json" > "$stage/wanted.json" || die 'Cannot apply the options; the config was not changed.'
+        # Unchanged settings keep the file, its layout and the running service.
+        if ! cmp -s <(jq -S . "$stage/current.json") <(jq -S . "$stage/wanted.json"); then
+            candidate=$stage/yggdrasil.conf
+            write_hjson "$stage/wanted.json" "$candidate" || die 'Cannot write the new config; it was not changed.'
         fi
     fi
 else
     candidate=$stage/yggdrasil.conf
     "$binary" -genconf -json 2>/dev/null |
-        YGG_KEY=$key jq --arg endpoint "$endpoint" --argjson peers "$peer_json" '
-            .IfName = "ygg0" | .AdminListen = $endpoint | .Peers = $peers |
-            .Listen = [] | .MulticastInterfaces = [
-                {Regex:"^wlan[0-9]+$", Beacon:true, Listen:true, Port:0, Priority:0}] |
-            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' > "$candidate" || die 'Config generation failed.'
+        YGG_KEY=$key jq --argjson peers "$peer_json" '
+            .IfName = "ygg0" | .Peers = $peers | .Listen = [] |
+            .MulticastInterfaces = [{Regex:"^wlan[0-9]+$", Beacon:true, Listen:true}] |
+            if env.YGG_KEY != "" then .PrivateKey = env.YGG_KEY else . end' > "$stage/wanted.json" &&
+        write_hjson "$stage/wanted.json" "$candidate" || die 'Config generation failed.'
 fi
 if ((${#trusted[@]})); then
     printf '%s\n' '# One Yggdrasil address or prefix (200::/7) per line, then an optional note.' \
