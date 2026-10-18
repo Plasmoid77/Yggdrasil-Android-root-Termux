@@ -47,6 +47,17 @@ Android 12+ can kill the Termux supervisor while root Yggdrasil keeps running. L
 
 Verified with these files on the author's phone: trusted-device ping/TCP, dropped untrusted sources, Syncthing over Yggdrasil in both directions, service start/stop, calls on Wi-Fi and mobile data, Wi-Fi ↔ mobile handover, reboot, AFWall+ enabled, and the installer on a clean phone. [Checks and limits](docs/INSTALL.md#evidence-and-limits).
 
+## Branches
+
+Use the installation guide and QUICKSTART from the same branch.
+
+| Branch | Profile |
+| --- | --- |
+| [main](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/main) | Upstream Yggdrasil, routing, firewall and runit |
+| [webrtc-vpn-compat](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/webrtc-vpn-compat) | Adds the event-driven VPN ULA handler |
+| [direct-vpn-bypass](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass) | Adds marked outgoing TCP-based and QUIC peer sockets outside the VPN |
+| [ultimate](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/ultimate) | **Recommended; this branch.** Direct peer transport, VPN ULA handler, trusted-device firewall and a one-command [install script](SCRIPT_INSTALL.md) |
+
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
