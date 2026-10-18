@@ -18,7 +18,8 @@ usage() {
     cat <<'USAGE'
 Usage: bash install.sh [options]
 
-  --peer URI              Public peer. Repeatable. Replaces the peers in the
+  --peer URI              Public peer: tcp, tls, quic, ws, wss, socks or
+                          sockstls. Repeatable. Replaces the peers in the
                           configuration; without any, they are kept.
   --trusted ADDR          Yggdrasil address or prefix (200::/7) allowed to
                           connect to this phone. Repeatable. Replaces the
@@ -37,9 +38,13 @@ USAGE
 
 say '1/8 Checks'
 peers=() trusted=() key_file= rebuild=0
+# Yggdrasil stops at startup on an unknown scheme, so check before replacing peers.
+peer_host='(\[[0-9A-Fa-f:.]+(%[^]/]+)?\]|[A-Za-z0-9.-]+)'
+peer_uri="^((tcp|tls|quic|socks|sockstls)://$peer_host:[0-9]{1,5}|(ws|wss)://$peer_host(:[0-9]{1,5})?)([/?].*)?$"
 while (($#)); do
     case $1 in
-        --peer) (($# >= 2)) && [[ $2 == *://?* && $2 != -* ]] || die '--peer needs a URI'
+        --peer) (($# >= 2)) && [[ $2 =~ $peer_uri ]] ||
+                die '--peer needs a URI such as tls://host:port (tcp, tls, quic, ws, wss, socks, sockstls)'
             peers+=("$2"); shift 2 ;;
         --trusted) (($# >= 2)) && [[ $2 =~ ^[23][0-9a-fA-F]{2}:[0-9a-fA-F:]*(/([0-9]{1,3}))?$ ]] &&
             ((10#${BASH_REMATCH[2]:-128} >= 7 && 10#${BASH_REMATCH[2]:-128} <= 128)) ||
@@ -58,6 +63,7 @@ unset YGG_PRIVATE_KEY
 if [[ -n $key_file ]]; then
     [[ -f $key_file && -r $key_file ]] || die "Cannot read $key_file"
     key=$(tr -d ' \t\r\n' < "$key_file")
+    [[ -n $key ]] || die "$key_file is empty."
 fi
 [[ -z $key || $key =~ ^[0-9a-fA-F]{128}$ ]] || die 'The private key must be 128 hex characters.'
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -89,6 +95,12 @@ for i in "${!packages[@]}"; do
     command -v "${commands[i]}" >/dev/null || missing+=("${packages[i]}")
 done
 ((${#missing[@]} == 0)) || pkg install -y "${missing[@]}"
+# Same check as firewall, which would silently skip a malformed entry.
+for address in "${trusted[@]}"; do
+    [[ $address == */* ]] || address+=/128
+    root -c 'exec ip -6 addr show to "$1"' ygg-installer "$address" >/dev/null 2>&1 ||
+        die "--trusted ${address%/128} is not a valid address or prefix. Nothing was changed."
+done
 
 say '3/8 Binaries'
 mkdir -p -- "$HOME/.cache/yggdrasil-ultimate"
@@ -119,7 +131,10 @@ binary=$PREFIX/bin/yggdrasil
 control=$PREFIX/bin/yggdrasilctl
 if ((rebuild)) || [[ ! -x $control ]] ||
    ! "$binary" -version 2>/dev/null | grep -qx 'Build version: 0.5.14-direct.3'; then
-    git -c advice.detachedHead=false clone -q --depth 1 --branch v0.5.14 https://github.com/yggdrasil-network/yggdrasil-go.git "$stage/yggdrasil-go"
+    # Fetch the tag: a shallow clone of an annotated tag prints a false warning.
+    git init -q -- "$stage/yggdrasil-go"
+    git -C "$stage/yggdrasil-go" fetch -q --depth 1 https://github.com/yggdrasil-network/yggdrasil-go.git refs/tags/v0.5.14
+    git -C "$stage/yggdrasil-go" -c advice.detachedHead=false checkout -q FETCH_HEAD
     [[ $(git -C "$stage/yggdrasil-go" rev-parse HEAD) == 422836eeb21a99790caa286aa63d493bbc4766d7 ]] ||
         die 'Unexpected v0.5.14 commit; installed files were not changed.'
     (
