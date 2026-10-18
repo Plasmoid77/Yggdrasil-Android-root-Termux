@@ -83,6 +83,7 @@ Use the installation guide and QUICKSTART from the same branch.
 | [main](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/main) | Upstream Yggdrasil, routing, firewall and runit |
 | [webrtc-vpn-compat](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/webrtc-vpn-compat) | Adds the event-driven VPN ULA handler |
 | [direct-vpn-bypass](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/direct-vpn-bypass) | Adds marked outgoing TCP-based and QUIC peer sockets outside the VPN |
+| [ultimate](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/tree/ultimate) | **Recommended.** Direct peer transport, VPN ULA handler, trusted-device firewall and a one-command [install script](https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux/blob/ultimate/SCRIPT_INSTALL.md) |
 
 The [full guide](docs/INSTALL.md) contains prerequisites, installation, Wi-Fi multicast, verification, service management, updates and removal.
 
