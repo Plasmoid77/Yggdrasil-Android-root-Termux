@@ -2,7 +2,7 @@
 
 Run native Yggdrasil on rooted Android. This setup uses a real `ygg0` interface, policy routing, runit supervision and a stateful IPv6 firewall.
 
-**[Quick setup](QUICKSTART.md) · [Full installation guide](docs/INSTALL.md)**
+**[Script installation](SCRIPT_INSTALL.md) · [Quick manual setup](QUICKSTART.md) · [Full installation guide](docs/INSTALL.md)**
 
 Yggdrasil peer connections bypass the Android VPN. The **ultimate profile** also adds trusted-device access and IPv6 helpers for calls on IPv4-only networks. [Compatibility and checks](docs/INSTALL.md#103-android-vpn--webrtcvoip-compatibility) · [Transport details](DIRECT-TRANSPORT.md).
 
@@ -27,7 +27,7 @@ git clone --depth 1 --branch ultimate https://github.com/Plasmoid77/Yggdrasil-An
 bash ~/yggdrasil-android-guide/install.sh
 ```
 
-Options: `--peer URI` and `--trusted ADDR` (repeatable; each replaces its list), `--private-key-file FILE` (keep a node identity), `--rebuild` (build again). Other settings are kept. [Automatic installation and manual steps](QUICKSTART.md#automatic-installation).
+Options: `--peer URI` and `--trusted ADDR` (repeatable; each replaces its list), `--private-key-file FILE` (keep a node identity), `--rebuild` (build again). Other settings are kept. [Script installation](SCRIPT_INSTALL.md) · [Manual installation](QUICKSTART.md).
 
 ## Service and autostart
 

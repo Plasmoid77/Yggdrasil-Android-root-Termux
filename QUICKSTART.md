@@ -4,7 +4,7 @@
 >
 > **Guide by Plasmoid (Neuroslopped)**
 
-Follow these installation steps. The [full installation guide](docs/INSTALL.md) explains the setup and checks.
+**To install with one script, follow [SCRIPT_INSTALL.md](SCRIPT_INSTALL.md).** This page describes the manual installation step by step. The [full installation guide](docs/INSTALL.md) explains the setup and checks.
 
 The ultimate profile sends TCP-based and QUIC/UDP peer traffic outside the Android VPN. It includes an event-driven ULA handler and a trusted-device inbound firewall. Android chooses Wi-Fi or mobile data. No extra switching service is needed. [Transport details and verification](DIRECT-TRANSPORT.md).
 
@@ -25,39 +25,6 @@ The steps below create one `10-services.sh` boot script and enable the service. 
 Android 12+ can kill the Termux supervisor while root Yggdrasil keeps running. When login or boot restores supervision, the service safely takes over the surviving session. Optional phantom-process settings affect all apps. With the default settings, a failed daemon cannot restart while its supervisor is absent. Read [background restrictions](docs/INSTALL.md#31-optional-android-child-process-restrictions).
 
 The boot script holds a wake lock, which costs battery power. [Power policy](docs/INSTALL.md#124-wake-lock-and-battery-cost).
-
-## Automatic installation
-
-Install `git` if needed (`pkg install git`), then run these commands as the normal Termux user:
-
-```sh
-git clone --depth 1 --branch ultimate https://github.com/Plasmoid77/Yggdrasil-Android-root-Termux.git ~/yggdrasil-android-guide
-bash ~/yggdrasil-android-guide/install.sh
-```
-
-Run as the normal Termux user. Options can be combined; replace the example values with current public peers and your own devices:
-
-```sh
-bash ~/yggdrasil-android-guide/install.sh --peer tcp://192.0.2.10:12345 --peer quic://192.0.2.20:12345 --trusted 200:1234:5678:9abc:def0:1234:5678:9abc
-```
-
-These are documentation addresses, not working peers or devices.
-
-- `--peer URI`: public peer; repeat for each. Replaces the configured peers. Without it, peers are kept, and a new node connects only to Wi-Fi multicast neighbours until you add public peers.
-- `--trusted ADDR`: Yggdrasil address or prefix within `200::/7` allowed to connect to this phone; repeat for each. Replaces the trusted list. Without it, the list is kept.
-- `--private-key-file FILE`: use an existing node identity. `FILE` holds only the 128-character hex private key. The environment variable `YGG_PRIVATE_KEY` may hold it instead; the key is never accepted on the command line. Without either, the configured key is kept and a new node gets a new key.
-- `--rebuild`: build again even when version `0.5.14-direct.3` is installed.
-- `--help`: show usage.
-
-**Code is replaced; settings change only when requested.** The installer backs up only code files it replaces under `~/yggdrasil-backup-<time>/` (mode 700), mirroring `usr/`. It never copies `yggdrasil.conf` into this backup. When `--peer` or `--private-key-file` changes the configuration, the previous file stays beside it as `yggdrasil.conf.previous` (mode 600; it holds the previous key) and Yggdrasil restarts. These two options edit only a JSON configuration, as the installer creates; for other formats it stops without changes. Missing settings are created. No backup is made when nothing is replaced.
-
-It is safe to run the installer again: unchanged files are left alone, changed code files are replaced with the service stopped first and started again, and settings change only through the options above. Each run reloads `YGG_IN`, resetting packet counters.
-
-On a fresh install, keep a private copy of `yggdrasil.conf`: it contains the node's private key.
-
-The installer was tested with a clean installation on the author's phone. [Installer steps](docs/INSTALL.md#automatic-installation).
-
-Continue below only for manual installation.
 
 ## 2. Install packages
 
